@@ -1,6 +1,7 @@
 import sys
 import json
 import pathlib
+import random
 from shutil import copyfile
 import torch
 import numpy as np
@@ -18,14 +19,15 @@ from data import Batcher
 
 
 def default_cfg():
-    cfg = OrderedDict(
-        # Data
+    cfg = OrderedDict(        
+        # Data        
         batch_size=200,
         data_dir='tmp',
         height=28,
         width=28, 
         output_dir='.',
         # CUDA
+        seed=42,
         device='cuda:0',
         # Joint distribution    
         y_dim=10,    
@@ -60,7 +62,7 @@ def default_cfg():
 
 def parse_args(path, break_if_missing=True, break_if_unknown=True):
     with open(path) as f:
-        d = json.load(open('cfg.vae.py'), object_hook=OrderedDict)
+        d = json.load(open(path), object_hook=OrderedDict)
     known = default_cfg()
     for k in known.keys():
         if k not in d:
@@ -128,6 +130,12 @@ def validate(vae: VAE, batcher: Batcher, num_samples: int, compute_DR=False):
 def main(cfg_file, load_ckpt=False, reset_opt=False):
     
     args = parse_args(cfg_file)
+    
+    # Reproducibility
+    torch.manual_seed(args.seed)
+    random.seed(args.seed)
+    np.random.seed(args.seed)    
+    
     # Make dirs
     pathlib.Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     copyfile(cfg_file, f"{args.output_dir}/cfg.json")
