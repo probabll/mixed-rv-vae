@@ -58,6 +58,22 @@ R_Y         0        0
 
 ```
 
+# Dirichlet VAE
+
+with 10 units
+
+```python
+metric        mean       std
+--------  --------  --------
+IS-NLL    118.015
+IS-BPD     17.0259
+D         106.71    34.2814
+R          14.7882   1.44848
+R_Z        14.7882   1.44848
+R_F         0        0
+R_Y         0        0
+```
+
 # Mixed RV VAE 
 
 This employs a mixtured of masked Dirichlet distributions as prior over a K-dimensional latent code (a sparse probability vector)
@@ -98,3 +114,51 @@ cfg = dict(
     use_reward_standardisation=True,
 )
 ``` 
+
+```python
+metric         mean        std
+--------  ---------  ---------
+IS-NLL    120.99
+IS-BPD     17.4551
+D         112.068    33.8009
+R          12.9761    2.52693
+R_Z         0         0
+R_F         5.07505   0.763042
+R_Y         7.90104   2.47224
+```
+
+
+# Mixed (NLL=120 -> lower)
+Y ~ mixed (Simplex)
+   sampling/marginal: \sum_f p(f)p(y|f)
+   Prior:
+    F ~ Gibbs(w_1, ..., w_K) properly normalised over constrained support
+    Y|F=f ~ Dir(1_{dim(f)+1})
+    
+   Posterior:
+    F|x ~ Gibbs(NN1(x))  from image x to K scores with an NN1
+        * no rparam (SFE)
+    Y|x,f ~ Dir(NN2(x))  from image x to dim(f)+1 concentrations with an NN2
+        * rparam (grep)
+     
+X|y ~ dec(y)
+
+
+# VAE-Dir 
+Z ~ Dirichlet (Simplex)  # latent code is a dense prob vector
+X|z ~ dec(z)
+
+Pr(full simple) = Dir(1)
+
+# samples
+# efficiency code! H N-precision bit
+
+
+# VAE (NLL=90)
+Z ~ Gaussian (R^D)      # latent code is an embedding 
+X|z ~ dec(z)
+
+# Mixture model with K components 
+
+C ~ Categorical()    
+X|c ~ dec(c)
