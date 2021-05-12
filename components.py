@@ -309,7 +309,7 @@ class VAE:
     """
 
     def __init__(self, p: GenerativeModel, q: InferenceModel, 
-                 use_self_critic=False, use_reward_standardisation=True):
+                 use_self_critic=False, use_reward_standardisation=True):        
         self.p = p
         self.q = q
         self.use_self_critic = use_self_critic
@@ -569,3 +569,4 @@ class VAE:
             # [B, D]
             ll = torch.logsumexp(log_p - log_q.unsqueeze(-1), 0) - np.log(num_samples)                   
         return ll    
+    
