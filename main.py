@@ -142,7 +142,7 @@ def main(cfg_file, **kwargs):
     
     # Make dirs
     pathlib.Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    json.dump(cfg, open(f"{args.output_dir}/cfg.json", "w"))
+    json.dump(cfg, open(f"{args.output_dir}/cfg.json", "w"), indent=4)
     #copyfile(cfg_file, f"{args.output_dir}/cfg.json")
     
     # Preparing data
