@@ -53,6 +53,8 @@ def default_cfg():
         gen_p_drop=0.1,  
         inf_p_drop=0.0,  # dropout for inference model is not well understood    
         grad_clip=5.0,
+        load_ckpt=False,
+        reset_opt=False,
         # Variance reduction
         use_self_critic=False,
         use_reward_standardisation=True,
@@ -60,22 +62,22 @@ def default_cfg():
     return cfg
 
 
-def parse_args(path, break_if_missing=True, break_if_unknown=True):
+def load_cfg(path, **kwargs):
     with open(path) as f:
-        d = json.load(open(path), object_hook=OrderedDict)
+        cfg = json.load(open(path), object_hook=OrderedDict)
     known = default_cfg()
     for k in known.keys():
-        if k not in d:
-            print(f"Are you sure you do not want to specify {k}?")
-            if break_if_missing:
-                raise ValueError(f'Missing cfg for {k}')
-    for k, v in d.items():
+        if k not in cfg:
+            raise ValueError(f'Missing cfg for {k}')
+    for k, v in cfg.items():
         if k not in known:
-            print(f"Key {k} with value {v} is unknown")
-            if break_if_unknown:
-                raise ValueError(f'Unknown cfg: {k}')
-    args = namedtuple('Config', d.keys())(*d.values())
-    return args 
+            raise ValueError(f'Unknown cfg: {k}')
+    for k, v in kwargs.items():
+        if k in known:
+            cfg[k] = v
+        else:
+            raise ValueError(f"Unknown hparam {k}")
+    return cfg
 
 
 def get_batcher(data_loader, args, binarize=True, num_classes=10, onehot=True):
@@ -127,18 +129,21 @@ def validate(vae: VAE, batcher: Batcher, num_samples: int, compute_DR=False):
         return nll, nll / np.log(2) / vae.p.latent_dim
 
 
-def main(cfg_file, load_ckpt=False, reset_opt=False):
+def main(cfg_file, **kwargs):
     
-    args = parse_args(cfg_file)
+    cfg = load_cfg(cfg_file, **kwargs)
+    args = namedtuple('Config', cfg.keys())(*cfg.values())
     
     # Reproducibility
+    print(f"# Reproducibility\nSetting random seed to {args.seed}")
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)    
     
     # Make dirs
     pathlib.Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    copyfile(cfg_file, f"{args.output_dir}/cfg.json")
+    json.dump(cfg, open(f"{args.output_dir}/cfg.json", "w"))
+    #copyfile(cfg_file, f"{args.output_dir}/cfg.json")
     
     # Preparing data
     print("# Preparing MNIST (may take some time the first time)", file=sys.stderr)
@@ -178,7 +183,7 @@ def main(cfg_file, load_ckpt=False, reset_opt=False):
     
     # Checkpoints
     
-    if load_ckpt and pathlib.Path(f"{args.output_dir}/training.ckpt").exists():
+    if args.load_ckpt and pathlib.Path(f"{args.output_dir}/training.ckpt").exists():
         print("Loading model parameters")
         ckpt = torch.load(f"{args.output_dir}/training.ckpt")
         p.load_state_dict(ckpt['p_state_dict'])            
@@ -188,7 +193,7 @@ def main(cfg_file, load_ckpt=False, reset_opt=False):
         # Get optimisers
         p_opt = torch.optim.Adam(p.parameters(), lr=args.gen_lr, weight_decay=args.gen_l2)
         q_opt = torch.optim.Adam(q.parameters(), lr=args.inf_lr, weight_decay=args.inf_l2)
-        if not reset_opt:
+        if not args.reset_opt:
             print("Loading optimiser state")
             p_opt.load_state_dict(ckpt['p_opt_state_dict'])
             q_opt.load_state_dict(ckpt['q_opt_state_dict'])
@@ -292,6 +297,7 @@ def main(cfg_file, load_ckpt=False, reset_opt=False):
     for k, v in val_DR.items():
         rows.append((k, v.mean(), v.std()))
     print(tabulate(rows, headers=['metric', 'mean', 'std']))    
+    return rows, ['metric', 'mean', 'std']
     
 #     print("Final test run")
 #     test_nll, test_bpd, test_DR = validate(
@@ -309,4 +315,4 @@ if __name__ == '__main__':
         print(" * resetopt")
         
         sys.exit()
-    main(sys.argv[1], 'loadckpt' in sys.argv[2:], 'resetopt' in sys.argv[2:])
+    main(sys.argv[1], load_ckpt='loadckpt' in sys.argv[2:], reset_opt='resetopt' in sys.argv[2:], seed=22)
