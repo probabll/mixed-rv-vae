@@ -1,3 +1,4 @@
+import wandb
 import sys
 import json
 import pathlib
@@ -18,6 +19,85 @@ from data import load_mnist
 from data import Batcher
 
 
+def get_optimiser(choice, params, lr, weight_decay, momentum=0.0):    
+    if choice == 'adam':
+        opt = torch.optim.Adam(params, lr=lr, weight_decay=weight_decay)
+    elif choice == 'rmsprop':
+        opt = torch.optim.RMSprop(params, lr=lr, weight_decay=weight_decay, momentum=momentum)
+    else:
+        raise ValueError("Unknown optimiser")
+    return opt
+
+
+def make_state(args, device: str, ckpt_path=None, load_opt=True):
+    """
+    :param ckpt_path: use None to get an untrained model
+    """
+
+    if ckpt_path and not pathlib.Path(ckpt_path).exists():
+        raise ValueError(f"I cannot find {ckpt_path}. Use None to get an untrained model.")
+
+    p = GenerativeModel(    
+        y_dim=args.y_dim,
+        z_dim=args.z_dim, 
+        data_dim=args.height * args.width, 
+        hidden_dec_size=args.hidden_dec_size,
+        p_drop=args.gen_p_drop,
+        prior_f=args.prior_f,
+        prior_y=args.prior_y,
+        prior_z=args.prior_z,
+    )
+    
+    q = InferenceModel(    
+        y_dim=args.y_dim,
+        z_dim=args.z_dim, 
+        data_dim=args.height * args.width, 
+        hidden_enc_size=args.hidden_enc_size,
+        shared_concentrations=args.shared_concentrations,
+        p_drop=args.inf_p_drop,
+        posterior_f=args.posterior_f,
+        posterior_y=args.posterior_y,
+        posterior_z=args.posterior_z,
+        mean_field=args.mean_field,
+    )
+    
+    # Checkpoints
+    
+    if ckpt_path:
+        ckpt = torch.load(ckpt_path)
+        p.load_state_dict(ckpt['p_state_dict'])            
+        p = p.to(torch.device(device))
+        q.load_state_dict(ckpt['q_state_dict'])            
+        q = q.to(torch.device(device))
+        # Get optimisers
+        p_opt = get_optimiser(args.gen_opt, p.parameters(), args.gen_lr, args.gen_l2)
+        q_opt = get_optimiser(args.inf_opt, q.parameters(), args.inf_lr, args.inf_l2)
+        if load_opt:
+            p_opt.load_state_dict(ckpt['p_opt_state_dict'])
+            q_opt.load_state_dict(ckpt['q_opt_state_dict'])
+        stats_tr = ckpt['stats_tr']
+        stats_val = ckpt['stats_val']
+    else:
+        p = p.to(torch.device(device))
+        q = q.to(torch.device(device))
+        # Get optimisers
+        p_opt = get_optimiser(args.gen_opt, p.parameters(), args.gen_lr, args.gen_l2)
+        q_opt = get_optimiser(args.inf_opt, q.parameters(), args.inf_lr, args.inf_l2)
+        stats_tr = defaultdict(list)
+        stats_val = defaultdict(list)
+
+    # Training 
+    
+    vae = VAE(p, q,
+        use_self_critic=args.use_self_critic, 
+        use_reward_standardisation=args.use_reward_standardisation
+    )
+
+
+    state = OrderedDict(vae=vae, p=p, q=q, p_opt=p_opt, q_opt=q_opt, stats_tr=stats_tr, stats_val=stats_val, args=args)
+    return namedtuple("State", state.keys())(*state.values())
+
+
 def default_cfg():
     cfg = OrderedDict(        
         # Data        
@@ -26,18 +106,22 @@ def default_cfg():
         height=28,
         width=28, 
         output_dir='.',
+        wandb=False,
+        wandb_watch=False,
         # CUDA
         seed=42,
         device='cuda:0',
         # Joint distribution    
-        y_dim=10,    
-        prior_scores=0.0,
         z_dim=32,     
-        z_dist='gaussian',    
-        prior_location=0.0, 
-        prior_scale=1.0,
+        prior_z='gaussian 0.0 1.0',
+        y_dim=10,    
+        prior_f='gibbs 0.0',
+        prior_y='dirichlet 1.0',
         hidden_dec_size=500,
         # Approximate posteriors
+        posterior_z='gaussian',
+        posterior_f='gibbs -10 10',
+        posterior_y='dirichlet 1e-3 1e3',
         shared_concentrations=True,
         mean_field=False,
         hidden_enc_size=500,    
@@ -46,11 +130,13 @@ def default_cfg():
         # Evaluation
         num_samples=100,    
         # Optimisation & regularisation
-        gen_lr=1e-4,
-        inf_lr=1e-4,  
-        gen_l2=1e-4,
-        inf_l2=1e-4,  
-        gen_p_drop=0.1,  
+        gen_opt="adam",
+        gen_lr=1e-3,
+        gen_l2=0.0,
+        gen_p_drop=0.0,
+        inf_opt="adam",
+        inf_lr=1e-3,  
+        inf_l2=0.0,  
         inf_p_drop=0.0,  # dropout for inference model is not well understood    
         grad_clip=5.0,
         load_ckpt=False,
@@ -66,18 +152,23 @@ def load_cfg(path, **kwargs):
     with open(path) as f:
         cfg = json.load(open(path), object_hook=OrderedDict)
     known = default_cfg()
-    for k in known.keys():
+    for k, v in known.items():
         if k not in cfg:
-            raise ValueError(f'Missing cfg for {k}')
+            cfg[k] = v
+            print(f"Setting {k} to default {v}", file=sys.stderr)
     for k, v in cfg.items():
         if k not in known:
             raise ValueError(f'Unknown cfg: {k}')
     for k, v in kwargs.items():
         if k in known:
             cfg[k] = v
+            print(f"Overriding {k} to user choice {v}", file=sys.stderr)
         else:
             raise ValueError(f"Unknown hparam {k}")
     return cfg
+
+def make_args(cfg: dict):
+    return namedtuple("Config", cfg.keys())(*cfg.values())
 
 
 def get_batcher(data_loader, args, binarize=True, num_classes=10, onehot=True):
@@ -132,6 +223,10 @@ def validate(vae: VAE, batcher: Batcher, num_samples: int, compute_DR=False):
 def main(cfg_file, **kwargs):
     
     cfg = load_cfg(cfg_file, **kwargs)
+    if cfg.get('wandb', False):
+        wandb.init(project='neurips21', config=cfg)
+        cfg['output_dir'] = f"{cfg['output_dir']}/{wandb.run.name}"
+        print(f"Output directory: {cfg['output_dir']}", file=sys.stderr)
     args = namedtuple('Config', cfg.keys())(*cfg.values())
     
     # Reproducibility
@@ -139,7 +234,7 @@ def main(cfg_file, **kwargs):
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)    
-    
+
     # Make dirs
     pathlib.Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     json.dump(cfg, open(f"{args.output_dir}/cfg.json", "w"), indent=4)
@@ -153,126 +248,99 @@ def main(cfg_file, **kwargs):
         height=args.height, 
         width=args.width
     )
-    
-    # Make model components
-    print("# Building model components", file=sys.stderr)
-    p = GenerativeModel(    
-        y_dim=args.y_dim,
-        z_dim=args.z_dim, 
-        data_dim=args.height * args.width, 
-        hidden_dec_size=args.hidden_dec_size,
-        p_drop=args.gen_p_drop,
-        prior_scores=args.prior_scores,
-        prior_location=args.prior_location,
-        prior_scale=args.prior_scale,
-        z_dist=args.z_dist,
+
+    print("# Building model", file=sys.stderr)
+    state = make_state(
+        args, 
+        device=args.device, 
+        ckpt_path=f"{args.output_dir}/training.ckpt" if args.load_ckpt else None, 
+        load_opt=not args.reset_opt
     )
-    print(f"Generative model\n{p}", file=sys.stderr)
-    
-    q = InferenceModel(    
-        y_dim=args.y_dim,
-        z_dim=args.z_dim, 
-        data_dim=args.height * args.width, 
-        hidden_enc_size=args.hidden_enc_size,
-        shared_concentrations=args.shared_concentrations,
-        p_drop=args.inf_p_drop,
-        z_dist=args.z_dist,
-        mean_field=args.mean_field,
-    )
-    print(f"Inference model\n{q}", file=sys.stderr)    
-    
-    # Checkpoints
-    
-    if args.load_ckpt and pathlib.Path(f"{args.output_dir}/training.ckpt").exists():
-        print("Loading model parameters")
-        ckpt = torch.load(f"{args.output_dir}/training.ckpt")
-        p.load_state_dict(ckpt['p_state_dict'])            
-        p = p.to(torch.device(args.device))
-        q.load_state_dict(ckpt['q_state_dict'])            
-        q = q.to(torch.device(args.device))
-        # Get optimisers
-        p_opt = torch.optim.Adam(p.parameters(), lr=args.gen_lr, weight_decay=args.gen_l2)
-        q_opt = torch.optim.Adam(q.parameters(), lr=args.inf_lr, weight_decay=args.inf_l2)
-        if not args.reset_opt:
-            print("Loading optimiser state")
-            p_opt.load_state_dict(ckpt['p_opt_state_dict'])
-            q_opt.load_state_dict(ckpt['q_opt_state_dict'])
-        stats_tr = ckpt['stats_tr']
-        stats_val = ckpt['stats_val']
-    else:
-        p = p.to(torch.device(args.device))
-        q = q.to(torch.device(args.device))
-        # Get optimisers
-        p_opt = torch.optim.Adam(p.parameters(), lr=args.gen_lr, weight_decay=args.gen_l2)
-        q_opt = torch.optim.Adam(q.parameters(), lr=args.inf_lr, weight_decay=args.inf_l2)
-        stats_tr = defaultdict(list)
-        stats_val = defaultdict(list)
+    #print(f"Generative model\n{state.p}", file=sys.stderr)
+    #print(f"Inference model\n{state.q}", file=sys.stderr)
 
     # Training 
     
-    vae = VAE(p, q,
-        use_self_critic=args.use_self_critic, 
-        use_reward_standardisation=args.use_reward_standardisation
-    )
-    
     # Demo 
     print("Example:\n 2 samples from inference model", file=sys.stderr)
-    print(q.sample(p.sample((2,))[-1]), file=sys.stderr)
+    print(state.q.sample(state.p.sample((2,))[-1]), file=sys.stderr)
     print(" their log probability density under q", file=sys.stderr)
-    print(q.log_prob(
+    print(state.q.log_prob(
         torch.zeros(args.height * args.width, device=torch.device(args.device)),
-        *q.sample(p.sample((2,))[-1]), 
+        *state.q.sample(state.p.sample((2,))[-1]), 
     ), file=sys.stderr)    
-    
+   
     
     print("# Training", file=sys.stderr)
-    val_metrics = validate(vae, get_batcher(valid_loader, args), args.num_samples)
+    val_metrics = validate(state.vae, get_batcher(valid_loader, args), args.num_samples)
     print(f'Validation {0:3d}: nll={val_metrics[0]:.2f} bpd={val_metrics[1]:.2f}', file=sys.stderr)
+
+    if args.wandb and args.wandb_watch:
+        wandb.watch(state.p)
+        wandb.watch(state.q)
+
     for epoch in range(args.epochs):
 
         iterator = tqdm(get_batcher(train_loader, args))
 
-        for x_obs, y_obs in iterator:        
+        for i, (x_obs, c_obs) in enumerate(iterator):
             # [B, H*W]
             x_obs = x_obs.reshape(-1, args.height * args.width)
             
-            vae.train()      
-            loss, ret = vae.loss(x_obs)
+            state.vae.train()      
+            #if i % 20 == 0:
+            #    samples, images = dict(), dict()
+            #else:
+            #    samples, images = None, None
+            samples, images = None, None
+
+            loss, ret = state.vae.loss(x_obs, c_obs, samples=samples, images=images)
 
             for k, v in ret.items():
-                stats_tr[k].append(v)
+                state.stats_tr[k].append(v)
 
-            p_opt.zero_grad()
-            q_opt.zero_grad()        
+            state.p_opt.zero_grad()
+            state.q_opt.zero_grad()        
             loss.backward()
 
             torch.nn.utils.clip_grad_norm_(
-                chain(vae.gen_parameters(), vae.inf_parameters()), 
+                chain(state.vae.gen_parameters(), state.vae.inf_parameters()), 
                 args.grad_clip
             )        
-            p_opt.step()
-            q_opt.step()
+            state.p_opt.step()
+            state.q_opt.step()
 
             iterator.set_description(f'Epoch {epoch+1:3d}/{args.epochs}')
             iterator.set_postfix(ret)
 
-        val_metrics = validate(vae, get_batcher(valid_loader, args), args.num_samples)
-        stats_val['val_nll'].append(val_metrics[0])
-        stats_val['val_bpd'].append(val_metrics[1])
+            if args.wandb and i % 50 == 0:
+                wandb.log({f"training.{k}": v for k, v in ret.items()}, commit=False)
+                if samples:
+                    wandb.log({f"training.{k}": v for k, v in samples.items()}, commit=False)
+                if images:
+                    wandb.log({f"training.{k}": wandb.Image(v) for k, v in images.items()})
+
+
+        val_metrics = validate(state.vae, get_batcher(valid_loader, args), args.num_samples, compute_DR=True)
+        state.stats_val['val_nll'].append(val_metrics[0])
+        state.stats_val['val_bpd'].append(val_metrics[1])
         print(f'Validation {epoch+1:3d}: nll={val_metrics[0]:.2f} bpd={val_metrics[1]:.2f}', file=sys.stderr)
+        if args.wandb:
+            wandb.log({'val.nll': val_metrics[0], 'val.bpd': val_metrics[1]}, commit=False)
+            wandb.log({f"val.{k}": v for k, v in val_metrics[2].items()})
         
         torch.save({
-            'p_state_dict': p.state_dict(),
-            'q_state_dict': q.state_dict(),
-            'p_opt_state_dict': p_opt.state_dict(),
-            'q_opt_state_dict': q_opt.state_dict(),
-            'stats_tr': stats_tr,
-            'stats_val': stats_val,
+            'p_state_dict': state.p.state_dict(),
+            'q_state_dict': state.q.state_dict(),
+            'p_opt_state_dict': state.p_opt.state_dict(),
+            'q_opt_state_dict': state.q_opt.state_dict(),
+            'stats_tr': state.stats_tr,
+            'stats_val': state.stats_val,
         }, f"{args.output_dir}/training.ckpt")
     
     
-    np_stats_tr = {k: np.array(v) for k, v in stats_tr.items()}
-    np_stats_val = {k: np.array(v) for k, v in stats_val.items()}
+    #np_stats_tr = {k: np.array(v) for k, v in stats_tr.items()}
+    #np_stats_val = {k: np.array(v) for k, v in stats_val.items()}
     
 #     torch.save({
 #         'epoch': epoch + 1,
@@ -292,7 +360,7 @@ def main(cfg_file, **kwargs):
     
     print("# Final validation run")
     val_nll, val_bpd, val_DR = validate(
-        vae, get_batcher(valid_loader, args), args.num_samples, compute_DR=True)
+        state.vae, get_batcher(valid_loader, args), args.num_samples, compute_DR=True)
     rows = [('NLL', val_nll, None), ('BPD', val_bpd, None)]
     for k, v in val_DR.items():
         rows.append((k, v.mean(), v.std()))

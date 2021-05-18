@@ -1,0 +1,225 @@
+import torch
+import numpy as np
+import torch
+import torch.distributions as td
+import probabll.distributions as pd
+import matplotlib.pyplot as plt
+import torch.nn as nn
+from collections import namedtuple, OrderedDict, defaultdict
+from itertools import chain
+
+
+def bitvec2str(f, as_set=False):
+    return ''.join('1' if b else '0' for b in f) if not as_set else '{' + ','.join(f'{i:1d}' for i, b in enumerate(f, 1) if b) + '}'
+
+
+def compare_marginals(vae, batcher, args): 
+    with torch.no_grad():
+        vae.eval()        
+    
+        prior = defaultdict(list)
+        posterior = defaultdict(list)
+        other = defaultdict(list)
+        num_obs = 0
+
+        # Some visualisations
+        for x_obs, y_obs in batcher:
+            
+            # [B, H*W]
+            x_obs = x_obs.reshape(-1, args.height * args.width)
+            num_obs += x_obs.shape[0]
+
+            # [B, 10]
+            context = None
+            
+            B, H, K, D = x_obs.shape[0], vae.p.z_dim, vae.p.y_dim, vae.p.data_dim            
+                        
+            # [B, K]
+            f = vae.p.F().expand((B,)).sample()
+            y = vae.p.Y(f).sample()
+            # [B, H]
+            z = vae.p.Z().expand((B,)).sample()
+            #x = vae.p.X(z=z, y=y).sample()
+                        
+            # [B, K]
+            prior['f'].append(f.cpu().numpy())
+            # [B]
+            prior['dim'].append(f.sum(-1).cpu().numpy())
+            # [B, K]
+            prior['y'].append(y.cpu().numpy())
+            # [B, K]
+            prior['z'].append(z.cpu().numpy())
+            
+            # [B, K], [B, K], [B, H]
+            f, y, z = vae.q.sample(x_obs)            
+            # [B, K]
+            posterior['f'].append(f.cpu().numpy())
+            # [B]
+            posterior['dim'].append(f.sum(-1).cpu().numpy())
+            # [B, K]
+            posterior['y'].append(y.cpu().numpy())
+            # [B, H]
+            posterior['z'].append(z.cpu().numpy())
+            
+            # [B]            
+            other['KL_F'].append(td.kl_divergence(vae.q.F(x_obs), vae.p.F().expand((B,))).cpu().numpy())
+            other['KL_Y'].append(td.kl_divergence(vae.q.Y(x=x_obs, f=f), vae.p.Y(f)).cpu().numpy())
+            other['KL_Z'].append(td.kl_divergence(vae.q.Z(x=x_obs, y=y), vae.p.Z().expand((B,))).cpu().numpy())
+            
+        # KLs
+        print("For a trained VAE: ")
+        print(" 1. We want to see that KL(Z|x || Z), KL(F|x || F), and KL(Y|f,x || Y|f) are generally > 0 for any x ~ D.")
+        
+        if vae.p.z_dim:
+            _ = plt.hist(np.concatenate(other['KL_Z'], 0), bins=20)
+            _ = plt.xlabel(r'$KL( Z|x,\lambda || Z| \theta )$')
+            plt.show()
+
+        if vae.p.y_dim:
+            _ = plt.hist(np.concatenate(other['KL_F'], 0), bins=20)
+            _ = plt.xlabel(r'$KL( F|x,\lambda || F| \theta )$')
+            plt.show()
+
+            _ = plt.hist(np.concatenate(other['KL_Y'], 0), bins=20)
+            _ = plt.xlabel(r'$KL( Y|f,x,\lambda || Y|f, \theta )$')
+            plt.show()
+            
+        
+        print(" 2. But, marginally, we expect E_X[Z|X] ~ Z E_X[F|X] ~ F and E_FX[Y|F,X] ~ E_F[Y|F].")
+        
+        if vae.p.z_dim:
+            _ = plt.hist(np.concatenate(prior['z'], 0).flatten(), density=True, alpha=0.3, label='Z')
+            _ = plt.hist(np.concatenate(posterior['z'], 0).flatten(), density=True, alpha=0.3, label='E[Z|X,Y]')
+            _ = plt.xlabel(r'$Z_d$')
+            _ = plt.legend()
+            plt.show()
+
+        if vae.p.y_dim:
+            # Pr(F_k = 1) compared to E_X[ I[F_k = 1] ]
+            _ = plt.imshow(
+                np.stack([vae.p.F().marginals().cpu().numpy(), np.concatenate(prior['f'], 0).mean(0), np.concatenate(posterior['f'], 0).mean(0)]), 
+                interpolation='nearest',
+            )
+            _ = plt.colorbar()
+            _ = plt.xlabel('k')
+            _ = plt.yticks([0,1, 2], ['F', 'E[F]', 'E[F|X]'])
+            _ = plt.title(r'Marginal probability that $F_k = 1$')
+            plt.show()
+
+            # Y_k compared to E_X[Y_k]
+
+            _ = plt.imshow(
+                np.stack([np.concatenate(prior['y'], 0).mean(0), np.concatenate(posterior['y'], 0).mean(0)]), 
+                interpolation='nearest'
+            )
+            _ = plt.colorbar()
+            _ = plt.xlabel('k')
+            _ = plt.yticks([0, 1], ['E[Y|F]', 'E[Y|F,X]'])
+            _ = plt.title(r'Average $Y_k$')
+            plt.show()
+
+            _ = plt.hist(
+                np.concatenate(prior['dim'], 0), 
+                alpha=0.3, label='dim(F)', bins=np.arange(0, 11))
+            _ = plt.hist(
+                np.concatenate(posterior['dim'], 0), 
+                alpha=0.3, label='E[dim(F)|X]', bins=np.arange(0, 11))
+            _ = plt.ylabel(f'Count')
+            _ = plt.xlabel('dim(f)+1')
+            _ = plt.xticks(np.arange(1,11), np.arange(1,11))
+            _ = plt.title(f'Distribution of dim(f)')
+            _ = plt.legend()
+            plt.show()
+
+def compare_samples(vae, batcher, args, N=4, num_figs=1): 
+
+    assert N <= args.batch_size, "N should be no bigger than a batch"
+    with torch.no_grad():
+        vae.p.eval()        
+        vae.q.eval()
+            
+        # Some visualisations
+        for r, (x_obs, y_obs) in enumerate(batcher, 1):
+
+            plt.figure(figsize=(2*N, 2*N))
+            plt.subplots_adjust(wspace=0.5, hspace=0.5)        
+        
+            
+            # [B, H*W]
+            x_obs = x_obs.reshape(-1, args.height * args.width)
+            x_obs = x_obs[:N]
+            # [B, 10]
+            context = None
+            
+            B, H, K, D = x_obs.shape[0], vae.p.z_dim, vae.p.y_dim, vae.p.data_dim            
+            # marginal probability
+            prob = vae.estimate_ll_per_bit(x_obs, args.num_samples).exp()            
+            # posterior samples
+            f, y, z = vae.q.sample(x_obs)
+            x = vae.p.X(y=y, z=z).sample()
+            # prior samples
+            f_, y_, z_, x_ = vae.p.sample((N,))
+
+            for i in range(N):
+                plt.subplot(4, N, 0*N + i + 1)
+                plt.imshow(x_obs[i].reshape(args.height, args.width).cpu(), cmap='Greys')
+                plt.title("$x^{(%d)}$" % (i+1))
+
+                plt.subplot(4, N, 1*N + i + 1)
+                plt.imshow(x[i].reshape(args.height, args.width).cpu(), cmap='Greys')
+                plt.title("$p(x^{(%d)})$" % (i+1))
+                
+                plt.subplot(4, N, 2*N + i + 1)                
+                #plt.axhline(y=args.height//2, c='red', linewidth=1, ls='--')
+                plt.imshow(x[i].reshape(args.height, args.width).cpu(), cmap='Greys')
+                plt.title("X,Y,F|$x^{(%d)}$" % (i+1))
+                if 0 < vae.p.y_dim <= 10:
+                    plt.xlabel(f'f={bitvec2str(f[i])}')
+                
+                plt.subplot(4, N, 3*N + i + 1)
+                plt.imshow(x_[i].reshape(args.height, args.width).cpu(), cmap='Greys')
+                plt.title("X,Y,F")
+                if 0 < vae.p.y_dim <= 10:
+                    plt.xlabel(f'f={bitvec2str(f[i])}')
+                
+            plt.show()
+
+            if r == num_figs:
+                break
+                
+def samples_per_digit(vae, batcher, args): 
+
+    with torch.no_grad():
+        vae.p.eval()        
+        vae.q.eval()
+            
+        groups_f = defaultdict(list)
+        groups_y = defaultdict(list)
+        groups_z = defaultdict(list)
+        groups_x = defaultdict(list)
+        # Some visualisations
+        for r, (x_obs, c_obs) in enumerate(batcher, 1):
+            
+            # [B, H*W]
+            x_obs = x_obs.reshape(-1, args.height * args.width)
+            
+            B, H, K, D = x_obs.shape[0], vae.p.z_dim, vae.p.y_dim, vae.p.data_dim            
+            # posterior samples
+            f, y, z = vae.q.sample(x_obs)
+            x = vae.p.X(y=y, z=z).sample()
+
+            for n in range(x_obs.shape[0]):
+                c = c_obs[n].item()
+                groups_f[c].append(f[n].cpu().numpy())
+                groups_y[c].append(y[n].cpu().numpy())
+                groups_z[c].append(z[n].cpu().numpy())
+                groups_x[c].append(x[n].cpu().numpy())
+      
+    def trim(samples: dict):
+        samples = [np.stack(vecs) for c, vecs in sorted(samples.items(), key=lambda pair: pair[0])]
+        size = min(v.shape[0] for v in samples)
+        return np.array([v[np.random.choice(v.shape[0], size, replace=False)] for v in samples])
+    
+    return trim(groups_f), trim(groups_y), trim(groups_z), trim(groups_x)
+        
+                

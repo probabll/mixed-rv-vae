@@ -7,8 +7,45 @@ import torch.nn as nn
 from collections import OrderedDict, deque
 
 
+@td.register_kl(td.RelaxedOneHotCategorical, td.Dirichlet)
+def _kl_concrete_dirichlet(p, q):
+    z = p.rsample()
+    return p.log_prob(z) - q.log_prob(z)
+
+@td.register_kl(td.RelaxedOneHotCategorical, td.RelaxedOneHotCategorical)
+def _kl_concrete_concrete(p, q):
+    z = p.rsample()
+    return p.log_prob(z) - q.log_prob(z)
+
+
 def assert_shape(t, shape, message):
     assert t.shape == shape, f"{message} has the wrong shape: got {t.shape}, expected {shape}"        
+
+
+def parse_prior_name(string):
+    parts = string.split(' ')
+    dist, params = parts[0], [float(x) for x in parts[1:]]
+    if dist == 'gaussian' and len(params) != 2:
+        raise ValueError("A Gaussian prior takes two parameters (loc, scale)")
+    if dist == 'dirichlet' and len(params) != 1:
+        raise ValueError("A Dirichlet prior takes 1 parameter (concentration)")
+    if dist == 'gibbs' and len(params) != 1:
+        raise ValueError("A Gibbs prior takes one parameter (score)")
+    if dist == 'concrete' and len(params) != 2:
+        raise ValueError("A Concrete prior takes two parameters (temperature, logit)")
+    if dist == 'onehotcat' and len(params) != 2:
+        raise ValueError("A OneHotCategorical prior takes two parameters (temperature, logit)")
+    return dist, params
+
+
+def parse_posterior_name(string):
+    parts = string.split(' ')
+    dist, params = parts[0], [float(x) for x in parts[1:]]
+    if dist == 'concrete' and len(params) == 0:
+        raise ValueError("A Concrete posterior takes at least one parameter (temperature)")
+    if dist == 'onehotcat' and len(params) == 0:
+        raise ValueError("A OneHotCategorical posterior takes at least one parameter (temperature)")
+    return dist, params
 
 
 class GenerativeModel(nn.Module):
@@ -31,8 +68,10 @@ class GenerativeModel(nn.Module):
     """
 
     def __init__(self, y_dim, z_dim, data_dim, hidden_dec_size, 
-                 p_drop=0.0, prior_scores=0.0, prior_location=0.0, prior_scale=1.0,
-                 z_dist='gaussian'
+                 p_drop=0.0, 
+                 prior_f='gibbs 0.0',
+                 prior_y='dirichlet 1.0',
+                 prior_z='gaussian 0.0 1.0'
             ):
         """        
         :param y_dim: dimensionality (K) of the mixed rv
@@ -50,13 +89,19 @@ class GenerativeModel(nn.Module):
             if 'dirichlet' we use prior_scale as the Dirichlet concentration 
             and ignore prior_location
         """
-        assert z_dim + y_dim > 0
-        assert z_dist in ['gaussian', 'dirichlet'], "Unknown choice of distribution for Z"
         super().__init__()
-        self._z_dim = z_dim
         self._y_dim = y_dim
+        self._z_dim = z_dim
         self._data_dim = data_dim   
-        self._z_dist = z_dist
+        self._f_dist, self._f_params = parse_prior_name(prior_f)
+        self._y_dist, self._y_params = parse_prior_name(prior_y)
+        self._z_dist, self._z_params = parse_prior_name(prior_z)
+        
+        assert z_dim + y_dim > 0
+        assert self._z_dist in ['gaussian', 'dirichlet', 'concrete', 'onehotcat'], f"Unknown choice of distribution for Z: {self._z_dist}"
+        assert self._f_dist in ['gibbs'], f"Unknown choice of distribution for F: {self._f_dist}"
+        assert self._y_dist in ['dirichlet'], f"Unknown choice of distribution for Y|f: {self._y_dist}"
+
         # TODO: support TransposedCNN?
         self._decoder = nn.Sequential(
             nn.Dropout(p_drop),
@@ -67,10 +112,35 @@ class GenerativeModel(nn.Module):
             nn.ReLU(),
             nn.Dropout(p_drop),
             nn.Linear(hidden_dec_size, data_dim),
-        )        
-        self.register_buffer("_prior_scores", (torch.zeros(y_dim, requires_grad=False) + prior_scores).detach())
-        self.register_buffer("_prior_location", (torch.zeros(z_dim, requires_grad=False) + prior_location).detach())
-        self.register_buffer("_prior_scale", (torch.zeros(z_dim, requires_grad=False) + prior_scale).detach())
+        )
+        if z_dim > 0:
+            if self._z_dist == 'gaussian':
+                self.register_buffer("_prior_z_location", (torch.zeros(z_dim, requires_grad=False) + self._z_params[0]).detach())
+                if self._z_params[1] <= 0:
+                    raise ValueError("The Gaussian scale for Z must be strictly positive")
+                self.register_buffer("_prior_z_scale", (torch.zeros(z_dim, requires_grad=False) + self._z_params[1]).detach())
+            elif self._z_dist == 'dirichlet':
+                if self._z_params[0] <= 0:
+                    raise ValueError("The Dirichlet concentration for Z must be strictly positive")
+                self.register_buffer("_prior_z_concentration", (torch.zeros(z_dim, requires_grad=False) + self._z_params[0]).detach())
+            elif self._z_dist in ['concrete', 'onehotcat']:
+                if self._z_params[0] <= 0:
+                    raise ValueError("The Concrete teperature for Z must be strictly positive")
+                self.register_buffer("_prior_z_temperature", (torch.zeros(1, requires_grad=False) + self._z_params[0]).detach())
+                self.register_buffer("_prior_z_logits", (torch.zeros(z_dim, requires_grad=False) + self._z_params[1]).detach())
+        else:
+            self.register_buffer("_prior_z_location", (torch.zeros(0, requires_grad=False)).detach())
+
+        if y_dim > 0:
+            if self._f_dist == 'gibbs':
+                self.register_buffer("_prior_f_scores", (torch.zeros(y_dim, requires_grad=False) + self._f_params[0]).detach())
+            if self._y_dist == 'dirichlet':
+                if self._y_params[0] <= 0:
+                    raise ValueError("The Dirichlet concentration for Y|F=f must be strictly positive")
+                self.register_buffer("_prior_y_concentration", (torch.zeros(1, requires_grad=False) + self._y_params[0]).detach())
+        else:
+            self.register_buffer("_prior_f_location", (torch.zeros(0, requires_grad=False)).detach())
+            self.register_buffer("_prior_y_location", (torch.zeros(0, requires_grad=False)).detach())
 
     @property
     def data_dim(self):
@@ -93,13 +163,19 @@ class GenerativeModel(nn.Module):
         if self._z_dim:            
             if self._z_dist == 'gaussian':
                 Z = td.Independent(
-                        td.Normal(loc=self._prior_location, scale=self._prior_scale),
+                        td.Normal(loc=self._prior_z_location, scale=self._prior_z_scale),
                         1
                 )
+            elif self._z_dist == 'dirichlet':
+                Z = td.Dirichlet(self._prior_z_concentration)
+            elif self._z_dist == 'concrete':
+                Z = td.RelaxedOneHotCategorical(self._prior_z_temperature, logits=self._prior_z_logits)
+            elif self._z_dist == 'onehotcat':
+                Z = pd.RelaxedOneHotCategoricalStraightThrough(self._prior_z_temperature, logits=self._prior_z_logits)
             else:
-                Z = td.Dirichlet(self._prior_scale)
+                raise ValueError(f"Unknown choice of distribution for Z: {self._z_dist}")
         else:
-            Z = td.Independent(pd.Delta(self._prior_location), 1)
+            Z = td.Independent(pd.Delta(self._prior_z_location), 1)
         return Z
 
     def F(self, predictors=None):
@@ -108,9 +184,9 @@ class GenerativeModel(nn.Module):
         :param predictors: input predictors, this is reserved for future use
         """
         if self._y_dim:
-            return pd.NonEmptyBitVector(scores=self._prior_scores)
+            return pd.NonEmptyBitVector(scores=self._prior_f_scores)
         else:
-            return td.Independent(pd.Delta(self._prior_scores), 1)
+            return td.Independent(pd.Delta(self._prior_f_location), 1)
 
     def Y(self, f, predictors=None):
         """
@@ -119,7 +195,7 @@ class GenerativeModel(nn.Module):
         :param predictors: input predictors, this is reserved for future use
         """
         if self._y_dim:
-            return pd.MaskedDirichlet(f.bool(), torch.ones_like(f))
+            return pd.MaskedDirichlet(f.bool(), self._prior_y_concentration * torch.ones_like(f))
         else:
             return td.Independent(pd.Delta(torch.zeros_like(f)), 1)
 
@@ -180,19 +256,30 @@ class InferenceModel(nn.Module):
     """
 
     def __init__(self, y_dim, z_dim, data_dim, hidden_enc_size, 
-                 p_drop=0.0, z_dist='gaussian', mean_field=True, shared_concentrations=True):
+                 p_drop=0.0, 
+                 posterior_z='gaussian', 
+                 posterior_f='gibbs -10 10',
+                 posterior_y='dirichlet 1e-3 1e3',
+                 mean_field=True, shared_concentrations=True):
         assert z_dim + y_dim > 0
-        assert z_dist in ['gaussian', 'dirichlet'], "Unknown choice of distribution for Z|x"
+        assert parse_posterior_name(posterior_z)[0] in ['gaussian', 'dirichlet', 'concrete', 'onehotcat'], "Unknown choice of distribution for Z|x"
+        assert parse_posterior_name(posterior_f)[0] in ['gibbs'], "Unknown choice of distribution for F|x"
+        assert parse_posterior_name(posterior_y)[0] in ['dirichlet'], "Unknown choice of distribution for Y|f,x"
+
         super().__init__()
                 
         self._y_dim = y_dim
         self._z_dim = z_dim
-        self._z_dist = z_dist
+        
+        self._f_dist, self._f_params = parse_posterior_name(posterior_f)
+        self._y_dist, self._y_params = parse_posterior_name(posterior_y)
+        self._z_dist, self._z_params = parse_posterior_name(posterior_z)
+
         self._mean_field = mean_field
         self._shared_concentrations = shared_concentrations
         
         if z_dim: 
-            z_num_params = 2 * z_dim if z_dist == 'gaussian' else z_dim
+            z_num_params = 2 * z_dim if self._z_dist == 'gaussian' else z_dim
             self._zparams_net = nn.Sequential(
                 nn.Dropout(p_drop),
                 nn.Linear(data_dim if mean_field else y_dim + data_dim, hidden_enc_size),
@@ -247,15 +334,28 @@ class InferenceModel(nn.Module):
             inputs = x if self._mean_field else torch.cat([y, x], -1)
             params = self._zparams_net(inputs)
             if self._z_dist == 'gaussian':                
-                Z = td.Normal(
-                    loc=params[...,:self._z_dim], 
-                    scale=nn.functional.softplus(params[...,self._z_dim:]))
-                Z = td.Independent(Z, 1)
+                loc, scale = params[..., :self._z_dim], nn.functional.softplus(params[..., self._z_dim:])
+                if len(self._z_params) == 2:  # we are clamping scales
+                    scale = torch.clamp(scales, self._z_params[0], self._z_params[1])
+                Z = td.Independent(td.Normal(loc=loc, scale=scale), 1)
+            elif self._z_dist == 'dirichlet':
+                conc = nn.functional.softplus(params)
+                if len(self._z_params) == 2: # we are clamping concentrations
+                    conc = torch.clamp(conc, self._z_params[0], self._z_params[1])
+                Z = td.Dirichlet(conc)
+            elif self._z_dist in ['concrete', 'onehotcat']:
+                logits = params
+                if len(self._z_params) == 3: # we are clamping logits
+                    logits = torch.clamp(logits, self._z_params[1], self._z_params[2])
+                if self._z_dist == 'concrete':
+                    Z = td.RelaxedOneHotCategorical(torch.zeros(1, device=params.device) + self._z_params[0], logits=logits)
+                else:
+                    Z = pd.RelaxedOneHotCategoricalStraightThrough(torch.zeros(1, device=params.device) + self._z_params[0], logits=logits)
             else:
-                Z = td.Dirichlet(nn.functional.softplus(params))
+                raise ValueError(f"Unknown distribution for Z|x,y: {self._z_dist}")
+
         else:
-            Z = pd.Delta(torch.zeros(x.shape[:-1] + (0,), device=x.device))
-            Z = td.Independent(Z, 1)
+            Z = td.Independent(pd.Delta(torch.zeros(x.shape[:-1] + (0,), device=x.device)), 1)
         return Z
             
     def F(self, x, predictors=None):
@@ -263,9 +363,8 @@ class InferenceModel(nn.Module):
             return td.Independent(pd.Delta(torch.zeros(x.shape[:-1] + (0,), device=x.device)), 1)
         # [B, K]
         scores = self._scores_net(x) 
-        # constrain scores?
-        # e.g., by clipping?
-        # 2.5 + tanh(NN(f,x)) * 2.5 + eps
+        if len(self._f_params) == 2: # we are clamping scores
+            scores = torch.clamp(scores, self._f_params[0], self._f_params[1])
         return pd.NonEmptyBitVector(scores)
 
 
@@ -279,9 +378,8 @@ class InferenceModel(nn.Module):
             inputs = torch.cat([f, x], -1)  # [...,K+D]
         # [...,K]
         concentration = self._concentrations_net(inputs) 
-        # constrain concentration?
-        # e.g., by clipping?
-        # 2.5 + tanh(NN(f,x)) * 2.5 + eps
+        if len(self._y_params) == 2:  # we are clamping concentrations
+            concentration = torch.clamp(concentration, self._y_params[0], self._y_params[1])
         return pd.MaskedDirichlet(f.bool(), concentration)
     
     def sample(self, x, sample_shape=torch.Size([])):
@@ -298,6 +396,7 @@ class InferenceModel(nn.Module):
     def log_prob(self, x, f, y, z, reduce=True):
         """log q(f|x), log q(y|f, x), log q(z|y, x)"""
         if reduce:
+
             return self.F(x).log_prob(f) + self.Y(x=x, f=f).log_prob(y) + self.Z(x=x, y=y).log_prob(z)
         else:
             return self.F(x).log_prob(f), self.Y(x=x, f=f).log_prob(y), self.Z(x=x, y=y).log_prob(z)
@@ -440,12 +539,14 @@ class VAE:
 
             ret['D'] = D
             ret['R'] = kl_F + kl_Y + kl_Z
-            ret['R_F'] = kl_F
-            ret['R_Y'] = kl_Y
-            ret['R_Z'] = kl_Z
+            if self.p.y_dim:
+                ret['R_F'] = kl_F
+                ret['R_Y'] = kl_Y
+            if self.p.z_dim:
+                ret['R_Z'] = kl_Z
         return ret
 
-    def loss(self, x_obs):
+    def loss(self, x_obs, c_obs=None, samples=None, images=None):
         """
         :param x_obs: [B, D]
         """
@@ -484,7 +585,7 @@ class VAE:
         ret = OrderedDict(
             loss=0.,
         )
-        
+
         # ELBO: the first term is an MC estimate (we sampled (f,y))
         # the second term is exact 
         # the third tuse_self_criticis an MC estimate (we sampled f)
@@ -495,6 +596,7 @@ class VAE:
         
         # Logging ELBO terms
         ret['D'] = -ll.mean(0).item()        
+        ret['R'] = (kl_F + kl_Y + kl_Z).mean(0).item()        
         if self.p.y_dim:
             ret['R_F'] = kl_F.mean(0).item()
             ret['R_Y'] = kl_Y.mean(0).item()
@@ -538,7 +640,26 @@ class VAE:
         # []
         loss = -(grep_surrogate + sfe_surrogate).mean(0)
         ret['loss'] = loss.item()
-
+        
+        if samples is not None:
+            if self.p.y_dim:
+                samples['f'] = f.detach().cpu()
+                samples['y'] = y.detach().cpu()
+            if self.p.z_dim:
+                samples['z'] = z.detach().cpu()
+        if images is not None:
+            if self.p.y_dim:
+                images['f'] = f.mean(0, keepdims=True).detach().cpu()
+                images['y'] = y.mean(0, keepdims=True).detach().cpu()
+                if c_obs is not None:
+                    # [B, K] -> [B, K, K] -> [K, K]
+                    images['f_given_c'] = ((f.unsqueeze(1) * c_obs.unsqueeze(-1)).sum(0) / c_obs.sum(0).unsqueeze(-1)).detach().cpu()
+                    images['y_given_c'] = ((y.unsqueeze(1) * c_obs.unsqueeze(-1)).sum(0) / c_obs.sum(0).unsqueeze(-1)).detach().cpu()
+            #if self.p.z_dim:
+            #    images['z'] = f.mean(0, keepdims=True).detach().cpu()
+            #    if c_obs is not None:
+            #        # [B, H] -> [B, K, H] -> [K, H]
+            #        images['z_given_c'] = ((z.unsqueeze(1) * c_obs.unsqueeze(-1)).sum(0) / c_obs.sum(0).unsqueeze(-1)).detach().cpu()
         return loss, ret
 
     def estimate_ll(self, x_obs, num_samples):     

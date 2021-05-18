@@ -2,18 +2,19 @@ import sys
 from main import main as do
 from tabulate import tabulate
 
-if len(sys.argv) != 2:
-    print(f"Usage: python {sys.argv[0]} cfg-name")
+if len(sys.argv) != 4:
+    print(f"Usage: python {sys.argv[0]} cfg-name first last")
     sys.exit()
 
-runs = 5
+name = sys.argv[1]
+first = int(sys.argv[2])
+last = int(sys.argv[3])
 rows = []
 headers = None
-name = sys.argv[1]
 
-print(f"Training {runs} of {name}")
+print(f"Training {name} {first}-{last}")
 
-for i in range(1, runs + 1):
+for i in range(first, last + 1):
     rs, headers = do(f'cfg/{name}.json', seed=10 + i, output_dir=f'neurips-mixed-rv/{name}/{i}')
 
     with open(f'neurips-mixed-rv/{name}/{i}/validation.txt', 'w') as f:
