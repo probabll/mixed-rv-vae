@@ -13,7 +13,7 @@ def bitvec2str(f, as_set=False):
     return ''.join('1' if b else '0' for b in f) if not as_set else '{' + ','.join(f'{i:1d}' for i, b in enumerate(f, 1) if b) + '}'
 
 
-def compare_marginals(vae, batcher, args): 
+def compare_marginals(vae, batcher, args, cols=5): 
     with torch.no_grad():
         vae.eval()        
     
@@ -88,13 +88,55 @@ def compare_marginals(vae, batcher, args):
         print(" 2. But, marginally, we expect E_X[Z|X] ~ Z E_X[F|X] ~ F and E_FX[Y|F,X] ~ E_F[Y|F].")
         
         if vae.p.z_dim:
-            _ = plt.hist(np.concatenate(prior['z'], 0).flatten(), density=True, alpha=0.3, label='Z')
-            _ = plt.hist(np.concatenate(posterior['z'], 0).flatten(), density=True, alpha=0.3, label='E[Z|X,Y]')
+            _ = plt.hist(np.concatenate(prior['z'], 0).flatten(), bins=30, density=True, alpha=0.3, label='Z')
+            _ = plt.hist(np.concatenate(posterior['z'], 0).flatten(), bins=30, density=True, alpha=0.3, label='E[Z|X,Y]')
             _ = plt.xlabel(r'$Z_d$')
             _ = plt.legend()
             plt.show()
+            
+            fig, axs = plt.subplots(
+                vae.p.z_dim//cols + vae.p.z_dim%cols, cols, 
+                sharex=True, sharey=True,
+                gridspec_kw={'hspace': 0, 'wspace': 0})
+            for c in range(vae.p.z_dim):
+                axs[c // cols, c % cols].hist(np.concatenate(prior['z'], 0)[:,c], bins=30, density=True, alpha=0.3, label='Z')
+                axs[c // cols, c % cols].hist(np.concatenate(posterior['z'], 0)[:,c], bins=30, density=True, alpha=0.3, label='E[Z|F,X]')
+                #axs[c // 5, c % 5].set_title(f"X'|X={c}")
+            #for ax in axs.flat:
+            #    ax.set_xticks([])
+            #    ax.set_yticks([])
+            # Hide x labels and tick labels for top plots and y ticks for right plots.
+            #for ax in axs.flat:
+            #    ax.label_outer()
+            #_ = fig.suptitle(r'$Y \overset{?}{\sim} E[Y|F,X_{obs}, \lambda, \theta]$')    
+            plt.legend(bbox_to_anchor=(1, 0.85), loc='upper left')
+            plt.show()
 
         if vae.p.y_dim:
+            _ = plt.hist(np.concatenate(prior['y'], 0).flatten(), bins=30, density=True, alpha=0.3, label='Y')
+            _ = plt.hist(np.concatenate(posterior['y'], 0).flatten(), bins=30, density=True, alpha=0.3, label='E[Y|F,X]')
+            _ = plt.xlabel(r'$Y_k$')
+            _ = plt.legend()
+            plt.show()
+            
+            fig, axs = plt.subplots(
+                vae.p.y_dim//cols + vae.p.y_dim%cols, cols, 
+                sharex=True, sharey=True,
+                gridspec_kw={'hspace': 0, 'wspace': 0})
+            for c in range(vae.p.y_dim):
+                axs[c // cols, c % cols].hist(np.concatenate(prior['y'], 0)[:,c], bins=30, density=True, alpha=0.3, label='Y')
+                axs[c // cols, c % cols].hist(np.concatenate(posterior['y'], 0)[:,c], bins=30, density=True, alpha=0.3, label='E[Y|F,X]')
+                #axs[c // 5, c % 5].set_title(f"X'|X={c}")
+            #for ax in axs.flat:
+            #    ax.set_xticks([])
+            #    ax.set_yticks([])
+            # Hide x labels and tick labels for top plots and y ticks for right plots.
+            #for ax in axs.flat:
+            #    ax.label_outer()
+            #_ = fig.suptitle(r'$Y \overset{?}{\sim} E[Y|F,X_{obs}, \lambda, \theta]$')    
+            plt.legend(bbox_to_anchor=(1, 0.85), loc='upper left')
+            plt.show()
+            
             # Pr(F_k = 1) compared to E_X[ I[F_k = 1] ]
             _ = plt.imshow(
                 np.stack([vae.p.F().marginals().cpu().numpy(), np.concatenate(prior['f'], 0).mean(0), np.concatenate(posterior['f'], 0).mean(0)]), 

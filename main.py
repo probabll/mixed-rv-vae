@@ -127,6 +127,7 @@ def default_cfg():
         hidden_enc_size=500,    
         # Training
         epochs=200,    
+        training_samples=1,
         # Evaluation
         num_samples=100,    
         # Optimisation & regularisation
@@ -142,6 +143,7 @@ def default_cfg():
         load_ckpt=False,
         reset_opt=False,
         # Variance reduction
+        exact_marginal=False,
         use_self_critic=False,
         use_reward_standardisation=True,
     )
@@ -272,8 +274,9 @@ def main(cfg_file, **kwargs):
    
     
     print("# Training", file=sys.stderr)
-    val_metrics = validate(state.vae, get_batcher(valid_loader, args), args.num_samples)
-    print(f'Validation {0:3d}: nll={val_metrics[0]:.2f} bpd={val_metrics[1]:.2f}', file=sys.stderr)
+    val_metrics = validate(state.vae, get_batcher(valid_loader, args), args.num_samples, compute_DR=True)
+    dr_string = ' '.join(f"{k}={v.mean():.2f}" for k, v in val_metrics[2].items())
+    print(f'Validation {0:3d}: nll={val_metrics[0]:.2f} bpd={val_metrics[1]:.2f} {dr_string}', file=sys.stderr)
 
     if args.wandb and args.wandb_watch:
         wandb.watch(state.p)
@@ -294,7 +297,10 @@ def main(cfg_file, **kwargs):
             #    samples, images = None, None
             samples, images = None, None
 
-            loss, ret = state.vae.loss(x_obs, c_obs, samples=samples, images=images)
+            loss, ret = state.vae.loss(x_obs, c_obs, 
+                num_samples=args.training_samples, samples=samples, images=images, 
+                exact_marginal=args.exact_marginal
+            )
 
             for k, v in ret.items():
                 state.stats_tr[k].append(v)
@@ -324,7 +330,10 @@ def main(cfg_file, **kwargs):
         val_metrics = validate(state.vae, get_batcher(valid_loader, args), args.num_samples, compute_DR=True)
         state.stats_val['val_nll'].append(val_metrics[0])
         state.stats_val['val_bpd'].append(val_metrics[1])
-        print(f'Validation {epoch+1:3d}: nll={val_metrics[0]:.2f} bpd={val_metrics[1]:.2f}', file=sys.stderr)
+        for k, v in val_metrics[2].items():
+            state.stats_val[f'val_{k}'].append(v.mean())
+        dr_string = ' '.join(f"{k}={v.mean():.2f}" for k, v in val_metrics[2].items())
+        print(f'Validation {epoch+1:3d}: nll={val_metrics[0]:.2f} bpd={val_metrics[1]:.2f} {dr_string}', file=sys.stderr)
         if args.wandb:
             wandb.log({'val.nll': val_metrics[0], 'val.bpd': val_metrics[1]}, commit=False)
             wandb.log({f"val.{k}": v for k, v in val_metrics[2].items()})

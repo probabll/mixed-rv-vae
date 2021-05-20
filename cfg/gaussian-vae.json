@@ -20,6 +20,7 @@
     "gen_p_drop": 0.0,  
     "inf_opt": "adam",
     "inf_lr": 1e-3,  
+    "inf_l2": 1e-6,  
     "inf_p_drop": 0.0, 
     "grad_clip": 5.0
 }

@@ -6,10 +6,10 @@ name = 'gaussian-vae'
 rows, headers = train(
         f'cfg/{name}.json', 
         seed=10, 
-        output_dir=f'neurips-mixed-rv/refactored/{name}/debug', 
-        device='cuda:1', 
+        output_dir=f'neurips-mixed-rv/cmp/{name}/debug', 
+        device='cuda:0', 
         wandb=False, 
-        epochs=200,
+        epochs=20,
         prior_z="gaussian 0.0 1.0",
         posterior_z="gaussian",
         gen_opt="adam",

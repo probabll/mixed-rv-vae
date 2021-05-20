@@ -31,6 +31,8 @@ def parse_prior_name(string):
         raise ValueError("A Dirichlet prior takes 1 parameter (concentration)")
     if dist == 'gibbs' and len(params) != 1:
         raise ValueError("A Gibbs prior takes one parameter (score)")
+    if dist == 'gibbs-max-ent' and len(params) != 1:
+        raise ValueError("A Gibbs prior takes one parameter (precision)")
     if dist == 'concrete' and len(params) != 2:
         raise ValueError("A Concrete prior takes two parameters (temperature, logit)")
     if dist == 'onehotcat' and len(params) != 2:
@@ -99,7 +101,7 @@ class GenerativeModel(nn.Module):
         
         assert z_dim + y_dim > 0
         assert self._z_dist in ['gaussian', 'dirichlet', 'concrete', 'onehotcat'], f"Unknown choice of distribution for Z: {self._z_dist}"
-        assert self._f_dist in ['gibbs'], f"Unknown choice of distribution for F: {self._f_dist}"
+        assert self._f_dist in ['gibbs', 'gibbs-max-ent'], f"Unknown choice of distribution for F: {self._f_dist}"
         assert self._y_dist in ['dirichlet'], f"Unknown choice of distribution for Y|f: {self._y_dist}"
 
         # TODO: support TransposedCNN?
@@ -134,6 +136,9 @@ class GenerativeModel(nn.Module):
         if y_dim > 0:
             if self._f_dist == 'gibbs':
                 self.register_buffer("_prior_f_scores", (torch.zeros(y_dim, requires_grad=False) + self._f_params[0]).detach())
+            elif self._f_dist == 'gibbs-max-ent':
+                self.register_buffer("_prior_f_pmf_n", pd.MaxEntropyFaces.pmf_n(y_dim, self._f_params[0]).detach())
+                p = pd.MaxEntropyFaces(self._prior_f_pmf_n)
             if self._y_dist == 'dirichlet':
                 if self._y_params[0] <= 0:
                     raise ValueError("The Dirichlet concentration for Y|F=f must be strictly positive")
@@ -184,7 +189,10 @@ class GenerativeModel(nn.Module):
         :param predictors: input predictors, this is reserved for future use
         """
         if self._y_dim:
-            return pd.NonEmptyBitVector(scores=self._prior_f_scores)
+            if self._f_dist == 'gibbs':
+                return pd.NonEmptyBitVector(scores=self._prior_f_scores)
+            elif self._f_dist == 'gibbs-max-ent':
+                return pd.MaxEntropyFaces(pmf_n=self._prior_f_pmf_n)
         else:
             return td.Independent(pd.Delta(self._prior_f_location), 1)
 
@@ -365,6 +373,7 @@ class InferenceModel(nn.Module):
         scores = self._scores_net(x) 
         if len(self._f_params) == 2: # we are clamping scores
             scores = torch.clamp(scores, self._f_params[0], self._f_params[1])
+            #scores = torch.tanh(scores) * 10.0
         return pd.NonEmptyBitVector(scores)
 
 
@@ -380,6 +389,7 @@ class InferenceModel(nn.Module):
         concentration = self._concentrations_net(inputs) 
         if len(self._y_params) == 2:  # we are clamping concentrations
             concentration = torch.clamp(concentration, self._y_params[0], self._y_params[1])
+            #concentration = torch.sigmoid(concentration) * 10.0
         return pd.MaskedDirichlet(f.bool(), concentration)
     
     def sample(self, x, sample_shape=torch.Size([])):
@@ -429,55 +439,61 @@ class VAE:
     def inf_parameters(self):
         return self.q.parameters()   
     
-    def critic(self, x_obs, z, q_F):
+    def critic(self, x_obs, z, q_F, num_samples=1):
         """This estimates reward (w.r.t sampling of F) on a single sample for variance reduction"""
-        B, H, K, D = x_obs.shape[0], self.p.z_dim, self.p.y_dim, self.p.data_dim
+        S, B, H, K, D = num_samples, x_obs.shape[0], self.p.z_dim, self.p.y_dim, self.p.data_dim
         with torch.no_grad():            
             # Approximate posteriors and samples
-            # [B, K]
+            # [S, B, K]
             f = q_F.sample()  # we resample f
-            assert_shape(f, (B, K), "f ~ F|X=x, \lambda")
+            assert_shape(f, (S, B, K), "f ~ F|X=x, \lambda")
             q_Y = self.q.Y(x=x_obs, f=f)  # and thus also resample y
-            # [B, K]
+            if q_Y.batch_shape != (S, B):
+                q_Y = q_Y.expand((S, B))
+            # [S, B, K]
             y = q_Y.sample() 
-            assert_shape(y, (B, K), "y ~ Y|X=x, F=f, \lambda")
+            assert_shape(y, (S, B, K), "y ~ Y|X=x, F=f, \lambda")
             if not self.q.mean_field:
                 q_Z = self.q.Z(x=x_obs, y=y)
-                # [B, H]
+                if q_Z.batch_shape != (S,B):
+                    q_Z = q_Z.expand((S, B))
+                # [S, B, H]
                 z = q_Z.sample()  # and thus also resample z
-                assert_shape(z, (B, H), "z ~ Z|X=x, Y=y, \lambda")
+                assert_shape(z, (S, B, H), "z ~ Z|X=x, Y=y, \lambda")
             else:
                 q_Z = None
             
             # Priors
             p_F = self.p.F()
-            if p_F.batch_shape != x_obs.shape[:1]:
-                p_F = p_F.expand(x_obs.shape[:1] + p_F.batch_shape)
+            if p_F.batch_shape != (S,B):
+                p_F = p_F.expand((S,B))
 
             p_Y = self.p.Y(f)  # we condition on f ~ q_F                     
+            if p_Y.batch_shape != (S,B):
+                p_Y = p_Y.expand((S,B))
 
             # Sampling distribution
             p_X = self.p.X(y=y, z=z)  # we condition on y ~ q_Y and z ~ q_Z
 
-            # [B]
+            # [S, B]
             ll = p_X.log_prob(x_obs)
-            # [B]
+            # [S, B]
             kl_Y = td.kl_divergence(q_Y, p_Y)
-            # [B]
+            # [S, B]
             critic = ll - kl_Y
             
             if not self.q.mean_field:
                 p_Z = self.p.Z()
-                if p_Z.batch_shape != x_obs.shape[:1]:
-                    p_Z = p_Z.expand(x_obs.shape[:1] + p_Z.batch_shape)
-                # [B]
+                if p_Z.batch_shape != (S, B):
+                    p_Z = p_Z.expand((S,B))
+                # [S, B]
                 kl_Z = td.kl_divergence(q_Z, p_Z)
-                # [B]
+                # [S, B]
                 critic -= kl_Z
             
             return critic
         
-    def update_reward_stats(self, reward):
+    def update_reward_stats(self, reward, dim=0):
         """Return the current statistics and update the vector"""
         if len(self._rewards) > 1:
             avg = np.mean(self._rewards)
@@ -487,7 +503,7 @@ class VAE:
             std = 1.0
         if len(self._rewards) == 100:
             self._rewards.popleft()
-        self._rewards.append(reward.mean(0).item())
+        self._rewards.append(reward.mean(dim).item())
         return avg, std
     
     def DR(self, x_obs):
@@ -525,6 +541,7 @@ class VAE:
 
             # Return type
             ret = OrderedDict(
+                ELBO=0.,
                 D=0.,
                 R=0.,
             )
@@ -537,6 +554,7 @@ class VAE:
             kl_F = td.kl_divergence(q_F, p_F)
             kl_Z = td.kl_divergence(q_Z, p_Z)
 
+            ret['ELBO'] = -D - (kl_F + kl_Y + kl_Z)
             ret['D'] = D
             ret['R'] = kl_F + kl_Y + kl_Z
             if self.p.y_dim:
@@ -545,8 +563,170 @@ class VAE:
             if self.p.z_dim:
                 ret['R_Z'] = kl_Z
         return ret
+    
+    
+    def loss(self, x_obs, c_obs=None, num_samples=1, samples=None, images=None, exact_marginal=False):
+        """
+        :param x_obs: [B, D]
+        """
+        if num_samples < 1:
+            raise ValueError("I cannot compute an estimate without sampling")
+        
+        S, B, H, K, D = num_samples, x_obs.shape[0], self.p.z_dim, self.p.y_dim, self.p.data_dim  # S > 1
 
-    def loss(self, x_obs, c_obs=None, samples=None, images=None):
+        # Approximate posteriors and samples
+        q_F = self.q.F(x_obs)
+        
+        if exact_marginal:
+            S = q_F.support_size
+            # [S, B, K]
+            f = q_F.enumerate_support()
+        else:
+            # [S, B, K]
+            f = q_F.sample((S,)) # not rsample
+        assert_shape(f, (S, B, K), "f ~ F|X=x, \lambda")
+        
+        # [S, B, D]
+        x_obs = x_obs.expand((S, B, D))
+
+        q_Y = self.q.Y(x=x_obs, f=f)
+        # [S, B, K]
+        y = q_Y.rsample()  # with reparameterisation! (important)
+        assert_shape(y, (S, B, K), "y ~ Y|F=f, \lambda")
+        
+        q_Z = self.q.Z(x=x_obs, y=y)
+        # [S, B, H]
+        z = q_Z.rsample()  # with reparameterisation
+        assert_shape(z, (S, B, H), "z ~ Z|X=x, \lambda")
+        
+        # Priors
+        p_F = self.p.F()
+        if p_F.batch_shape != (B,):
+            p_F = p_F.expand((B,))
+        
+        p_Y = self.p.Y(f)  # we condition on f ~ q_F  thus batch_shape is already correct
+        
+        p_Z = self.p.Z()
+        if p_Z.batch_shape != (S,B):
+            p_Z = p_Z.expand((S,B))
+            
+        # Sampling distribution
+        p_X = self.p.X(y=y, z=z)  # we condition on y ~ q_Y
+        
+        # Return type
+        ret = OrderedDict(
+            loss=0.,
+        )
+
+        # E_F E_Y E_Z [log p(x|y)] - KL_F - E_F[KL_Y] - KL_Z
+        # sum_f q(f) E_Y E_Z [log p(x|y)] - KL_F - \sum_f KL_Y - KL_Z
+        # sum_f q(f) log p(x|y) 
+        # - KL_F
+        # - sum_f q(f) KL(Y|f,x || Y|f)
+        # - KL_Z
+
+        # ELBO: the first term is an MC estimate (we sampled (f,y))
+        # the second term is exact 
+        # the third tuse_self_criticis an MC estimate (we sampled f)
+        # [S, B]
+        ll = p_X.log_prob(x_obs)        
+        kl_Y = td.kl_divergence(q_Y, p_Y)
+        if exact_marginal:
+            # [S, B]
+            prob_f = q_F.log_prob(f).exp()
+            #print('prob_f', prob_f.shape, prob_f[:,0])
+            # [1, B]
+            ll = (prob_f * ll).sum(0, keepdims=True)
+            kl_Y = (prob_f * kl_Y).sum(0, keepdims=True)
+        # [1, B]
+        kl_F = td.kl_divergence(q_F, p_F).unsqueeze(0)
+        # [S, B]
+        kl_Z = td.kl_divergence(q_Z, p_Z)
+        
+        # Logging ELBO terms
+        # []
+        reduce_dims = (0,1)
+        ret['D'] = -ll.mean((0,1)).item()        
+        ret['R'] = (kl_F + kl_Y + kl_Z).mean((0,1)).item()        
+        ret['ELBO'] = (ll - kl_Y - kl_Z - kl_F).mean((0,1)).item()
+        if self.p.y_dim:
+            ret['R_F'] = kl_F.mean((0,1)).item()
+            ret['R_Y'] = kl_Y.mean((0,1)).item()
+        if self.p.z_dim:
+            ret['R_Z'] = kl_Z.mean((0,1)).item()        
+            
+        # Gradient surrogates and loss
+        
+        # i) reparameterised gradient (g_rep)
+        # [S,B]
+        grep_surrogate = ll - kl_Z - kl_F - kl_Y  
+
+        # ii) score function estimator (g_SFE)
+        if self.p.y_dim and not exact_marginal:
+            # E_ZFY[ log p(x|z,f,y)] - -KL(Z) - KL(F) - E_F[ KL(Y) ]
+            # E_F[ E_Y[ E_Z[ log p(x|z,f,y) ] - KL(Y) ] ] -KL(Z) - KL(F)
+            # E_F[ r(F) ] for r(f) = log p(x|z,f,y)
+            # r(f).detach() * log q(f)  
+            # [S, B]
+            reward = (ll - kl_Y).detach() if self.q.mean_field else (ll - kl_Y - kl_Z).detach()
+            # Variance reduction tricks
+            if self.use_self_critic:
+                if num_samples > 1:
+                    # [S, B]
+                    sum_others = reward.sum(0, keepdims=True) - reward
+                    critic = sum_others / (num_samples - 1)
+                    # [S, B]
+                    critic = (sum_others + critic) / num_samples
+                    criticised_reward = reward - critic.detach() 
+                else:
+                    # [S, B]
+                    criticised_reward = reward - self.critic(x_obs, z=z, q_F=q_F, num_samples=num_samples).detach()
+            else:
+                criticised_reward = reward
+            if self.use_reward_standardisation:
+                reward_avg, reward_std = self.update_reward_stats(criticised_reward, dim=reduce_dims)
+                standardised_reward = (criticised_reward - reward_avg) / np.maximum(reward_std, 1.0)
+            else:
+                standardised_reward = criticised_reward
+
+            # [S, B]
+            sfe_surrogate = standardised_reward * q_F.log_prob(f)
+            
+            # Loggin SFE variants
+            ret['SFE_reward'] = reward.mean(reduce_dims).item()
+            if self.use_self_critic:
+                ret['SFE_criticised_reward'] = criticised_reward.mean(reduce_dims).item()
+            if self.use_reward_standardisation:
+                ret['SFE_standardised_reward'] = standardised_reward.mean(reduce_dims).item()
+        else:
+            sfe_surrogate = torch.zeros_like(grep_surrogate)
+        
+        # []
+        loss = -(grep_surrogate + sfe_surrogate).mean((0,1))
+        ret['loss'] = loss.item()
+        
+        if samples is not None:
+            if self.p.y_dim:
+                samples['f'] = f.detach().cpu()
+                samples['y'] = y.detach().cpu()
+            if self.p.z_dim:
+                samples['z'] = z.detach().cpu()
+        if images is not None:
+            if self.p.y_dim:
+                images['f'] = f.mean(0, keepdims=True).detach().cpu()
+                images['y'] = y.mean(0, keepdims=True).detach().cpu()
+                if c_obs is not None:
+                    # [B, K] -> [B, K, K] -> [K, K]
+                    images['f_given_c'] = ((f.unsqueeze(1) * c_obs.unsqueeze(-1)).sum(0) / c_obs.sum(0).unsqueeze(-1)).detach().cpu()
+                    images['y_given_c'] = ((y.unsqueeze(1) * c_obs.unsqueeze(-1)).sum(0) / c_obs.sum(0).unsqueeze(-1)).detach().cpu()
+            #if self.p.z_dim:
+            #    images['z'] = f.mean(0, keepdims=True).detach().cpu()
+            #    if c_obs is not None:
+            #        # [B, H] -> [B, K, H] -> [K, H]
+            #        images['z_given_c'] = ((z.unsqueeze(1) * c_obs.unsqueeze(-1)).sum(0) / c_obs.sum(0).unsqueeze(-1)).detach().cpu()
+        return loss, ret
+
+    def _loss(self, x_obs, c_obs=None, samples=None, images=None):
         """
         :param x_obs: [B, D]
         """
@@ -597,6 +777,7 @@ class VAE:
         # Logging ELBO terms
         ret['D'] = -ll.mean(0).item()        
         ret['R'] = (kl_F + kl_Y + kl_Z).mean(0).item()        
+        ret['ELBO'] = (ll - kl_F - kl_Y - kl_Z).mean(0).item()
         if self.p.y_dim:
             ret['R_F'] = kl_F.mean(0).item()
             ret['R_Y'] = kl_Y.mean(0).item()
@@ -606,7 +787,7 @@ class VAE:
         # Gradient surrogates and loss
         
         # i) reparameterised gradient (g_rep)
-        grep_surrogate = ll - kl_Z - kl_F - kl_Y
+        grep_surrogate = ll - kl_Z - kl_F - kl_Y  
 
         # ii) score function estimator (g_SFE)
         if self.p.y_dim:            
