@@ -5,6 +5,7 @@ import torch.distributions as td
 import probabll.distributions as pd
 import torch.nn as nn
 from collections import OrderedDict, deque
+from gaussiansp import GaussianSparsemax, GaussianSparsemaxPrior
 
 
 @td.register_kl(td.RelaxedOneHotCategorical, td.Dirichlet)
@@ -37,6 +38,8 @@ def parse_prior_name(string):
         raise ValueError("A Concrete prior takes two parameters (temperature, logit)")
     if dist == 'onehotcat' and len(params) != 2:
         raise ValueError("A OneHotCategorical prior takes two parameters (temperature, logit)")
+    if dist == 'gaussian-sparsemax-max-ent' and len(params) != 1:
+        raise ValueError("A Gaussian-Sparsemax-Max-Ent prior takes one parameter (precision)")
     return dist, params
 
 
@@ -100,7 +103,7 @@ class GenerativeModel(nn.Module):
         self._z_dist, self._z_params = parse_prior_name(prior_z)
         
         assert z_dim + y_dim > 0
-        assert self._z_dist in ['gaussian', 'dirichlet', 'concrete', 'onehotcat'], f"Unknown choice of distribution for Z: {self._z_dist}"
+        assert self._z_dist in ['gaussian', 'dirichlet', 'concrete', 'onehotcat', 'gaussian-sparsemax-max-ent'], f"Unknown choice of distribution for Z: {self._z_dist}"
         assert self._f_dist in ['gibbs', 'gibbs-max-ent'], f"Unknown choice of distribution for F: {self._f_dist}"
         assert self._y_dist in ['dirichlet'], f"Unknown choice of distribution for Y|f: {self._y_dist}"
 
@@ -130,6 +133,8 @@ class GenerativeModel(nn.Module):
                     raise ValueError("The Concrete teperature for Z must be strictly positive")
                 self.register_buffer("_prior_z_temperature", (torch.zeros(1, requires_grad=False) + self._z_params[0]).detach())
                 self.register_buffer("_prior_z_logits", (torch.zeros(z_dim, requires_grad=False) + self._z_params[1]).detach())
+            elif self._z_dist == 'gaussian-sparsemax-max-ent':
+                self.register_buffer("_prior_z_pmf_n", pd.MaxEntropyFaces.pmf_n(z_dim, self._z_params[0]).detach())
         else:
             self.register_buffer("_prior_z_location", (torch.zeros(0, requires_grad=False)).detach())
 
@@ -177,6 +182,8 @@ class GenerativeModel(nn.Module):
                 Z = td.RelaxedOneHotCategorical(self._prior_z_temperature, logits=self._prior_z_logits)
             elif self._z_dist == 'onehotcat':
                 Z = pd.RelaxedOneHotCategoricalStraightThrough(self._prior_z_temperature, logits=self._prior_z_logits)
+            elif self._z_dist == 'gaussian-sparsemax-max-ent':
+                Z = GaussianSparsemaxPrior(pd.MaxEntropyFaces(pmf_n=self._prior_z_pmf_n), torch.ones_like)
             else:
                 raise ValueError(f"Unknown choice of distribution for Z: {self._z_dist}")
         else:
@@ -270,7 +277,7 @@ class InferenceModel(nn.Module):
                  posterior_y='dirichlet 1e-3 1e3',
                  mean_field=True, shared_concentrations=True):
         assert z_dim + y_dim > 0
-        assert parse_posterior_name(posterior_z)[0] in ['gaussian', 'dirichlet', 'concrete', 'onehotcat'], "Unknown choice of distribution for Z|x"
+        assert parse_posterior_name(posterior_z)[0] in ['gaussian', 'dirichlet', 'concrete', 'onehotcat', 'gaussian-sparsemax'], "Unknown choice of distribution for Z|x"
         assert parse_posterior_name(posterior_f)[0] in ['gibbs'], "Unknown choice of distribution for F|x"
         assert parse_posterior_name(posterior_y)[0] in ['dirichlet'], "Unknown choice of distribution for Y|f,x"
 
@@ -287,7 +294,7 @@ class InferenceModel(nn.Module):
         self._shared_concentrations = shared_concentrations
         
         if z_dim: 
-            z_num_params = 2 * z_dim if self._z_dist == 'gaussian' else z_dim
+            z_num_params = 2 * z_dim if self._z_dist in ['gaussian', 'gaussian-sparsemax'] else z_dim
             self._zparams_net = nn.Sequential(
                 nn.Dropout(p_drop),
                 nn.Linear(data_dim if mean_field else y_dim + data_dim, hidden_enc_size),
@@ -346,6 +353,11 @@ class InferenceModel(nn.Module):
                 if len(self._z_params) == 2:  # we are clamping scales
                     scale = torch.clamp(scales, self._z_params[0], self._z_params[1])
                 Z = td.Independent(td.Normal(loc=loc, scale=scale), 1)
+            elif self._z_dist == 'gaussian-sparsemax':
+                loc, scale = params[..., :self._z_dim], nn.functional.softplus(params[..., self._z_dim:])
+                if len(self._z_params) == 2:  # we are clamping scales
+                    scale = torch.clamp(scales, self._z_params[0], self._z_params[1])
+                Z = GaussianSparsemax(loc=loc, scale=scale)
             elif self._z_dist == 'dirichlet':
                 conc = nn.functional.softplus(params)
                 if len(self._z_params) == 2: # we are clamping concentrations
