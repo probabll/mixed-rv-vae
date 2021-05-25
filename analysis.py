@@ -13,7 +13,7 @@ def bitvec2str(f, as_set=False):
     return ''.join('1' if b else '0' for b in f) if not as_set else '{' + ','.join(f'{i:1d}' for i, b in enumerate(f, 1) if b) + '}'
 
 
-def compare_marginals(vae, batcher, args, cols=5): 
+def compare_marginals(vae, batcher, args, cols=5, exact_marginals=False): 
     with torch.no_grad():
         vae.eval()        
     
@@ -98,6 +98,8 @@ def compare_marginals(vae, batcher, args, cols=5):
                 vae.p.z_dim//cols + vae.p.z_dim%cols, cols, 
                 sharex=True, sharey=True,
                 gridspec_kw={'hspace': 0, 'wspace': 0})
+            if len(axs.shape) == 1:
+                axs = axs[None,:]
             for c in range(vae.p.z_dim):
                 axs[c // cols, c % cols].hist(np.concatenate(prior['z'], 0)[:,c], bins=30, density=True, alpha=0.3, label='Z')
                 axs[c // cols, c % cols].hist(np.concatenate(posterior['z'], 0)[:,c], bins=30, density=True, alpha=0.3, label='E[Z|F,X]')
@@ -122,7 +124,9 @@ def compare_marginals(vae, batcher, args, cols=5):
             fig, axs = plt.subplots(
                 vae.p.y_dim//cols + vae.p.y_dim%cols, cols, 
                 sharex=True, sharey=True,
-                gridspec_kw={'hspace': 0, 'wspace': 0})
+                gridspec_kw={'hspace': 0, 'wspace': 0})            
+            if len(axs.shape) == 1:
+                axs = axs[None,:]
             for c in range(vae.p.y_dim):
                 axs[c // cols, c % cols].hist(np.concatenate(prior['y'], 0)[:,c], bins=30, density=True, alpha=0.3, label='Y')
                 axs[c // cols, c % cols].hist(np.concatenate(posterior['y'], 0)[:,c], bins=30, density=True, alpha=0.3, label='E[Y|F,X]')
@@ -138,15 +142,27 @@ def compare_marginals(vae, batcher, args, cols=5):
             plt.show()
             
             # Pr(F_k = 1) compared to E_X[ I[F_k = 1] ]
-            _ = plt.imshow(
-                np.stack([vae.p.F().marginals().cpu().numpy(), np.concatenate(prior['f'], 0).mean(0), np.concatenate(posterior['f'], 0).mean(0)]), 
-                interpolation='nearest',
-            )
-            _ = plt.colorbar()
-            _ = plt.xlabel('k')
-            _ = plt.yticks([0,1, 2], ['F', 'E[F]', 'E[F|X]'])
-            _ = plt.title(r'Marginal probability that $F_k = 1$')
-            plt.show()
+            if exact_marginals:
+                _ = plt.imshow(
+                    np.stack([vae.p.F().marginals().cpu().numpy(), np.concatenate(prior['f'], 0).mean(0), np.concatenate(posterior['f'], 0).mean(0)]),     
+                    interpolation='nearest',
+                )
+                _ = plt.colorbar()
+                _ = plt.xlabel('k')
+                _ = plt.yticks([0, 1, 2], ['F', 'E[F]', 'E[F|X]'])
+                _ = plt.title(r'Marginal probability that $F_k = 1$')
+                plt.show()
+
+            else:
+                _ = plt.imshow(
+                    np.stack([np.concatenate(prior['f'], 0).mean(0), np.concatenate(posterior['f'], 0).mean(0)]), 
+                    interpolation='nearest',
+                )
+                _ = plt.colorbar()
+                _ = plt.xlabel('k')
+                _ = plt.yticks([0, 1], ['E[F]', 'E[F|X]'])
+                _ = plt.title(r'Marginal probability that $F_k = 1$')
+                plt.show()
 
             # Y_k compared to E_X[Y_k]
 

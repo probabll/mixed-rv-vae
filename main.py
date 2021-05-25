@@ -157,14 +157,14 @@ def load_cfg(path, **kwargs):
     for k, v in known.items():
         if k not in cfg:
             cfg[k] = v
-            print(f"Setting {k} to default {v}", file=sys.stderr)
+            print(f"Setting {k} to default {v}", file=sys.stdout)
     for k, v in cfg.items():
         if k not in known:
             raise ValueError(f'Unknown cfg: {k}')
     for k, v in kwargs.items():
         if k in known:
             cfg[k] = v
-            print(f"Overriding {k} to user choice {v}", file=sys.stderr)
+            print(f"Overriding {k} to user choice {v}", file=sys.stdout)
         else:
             raise ValueError(f"Unknown hparam {k}")
     return cfg
@@ -221,175 +221,185 @@ def validate(vae: VAE, batcher: Batcher, num_samples: int, compute_DR=False):
     else:
         return nll, nll / np.log(2) / vae.p.latent_dim
 
+def save_state(state, path):
+    torch.save({
+        'p_state_dict': state.p.state_dict(),
+        'q_state_dict': state.q.state_dict(),
+        'p_opt_state_dict': state.p_opt.state_dict(),
+        'q_opt_state_dict': state.q_opt.state_dict(),
+        'stats_tr': state.stats_tr,
+        'stats_val': state.stats_val,
+    }, path)
 
-def main(cfg_file, **kwargs):
+def main(cfg: dict):
     
-    cfg = load_cfg(cfg_file, **kwargs)
-    if cfg.get('wandb', False):
-        wandb.init(project='neurips21', config=cfg)
+    #if cfg.get('wandb', False):
+    #    wandb.init(project='neurips21', config=cfg)
+    #    cfg['output_dir'] = f"{cfg['output_dir']}/{wandb.run.name}"
+    #    print(f"Output directory: {cfg['output_dir']}", file=sys.stdout)
+    #args = namedtuple('Config', cfg.keys())(*cfg.values())
+    
+    with wandb.init(config=cfg):
+        args = wandb.config
+        # Config
         cfg['output_dir'] = f"{cfg['output_dir']}/{wandb.run.name}"
-        print(f"Output directory: {cfg['output_dir']}", file=sys.stderr)
-    args = namedtuple('Config', cfg.keys())(*cfg.values())
-    
-    # Reproducibility
-    print(f"# Reproducibility\nSetting random seed to {args.seed}")
-    torch.manual_seed(args.seed)
-    random.seed(args.seed)
-    np.random.seed(args.seed)    
+        args.update({'output_dir': cfg['output_dir']}, allow_val_change=True)
+        output_dir = pathlib.Path(args.output_dir)
+        print(f"# Setup\nOutput directory: {output_dir}", file=sys.stdout)
+        # Make dirs
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Save hparams
+        json.dump(cfg, open(f"{output_dir}/cfg.json", "w"), indent=4)
+        print(f"Config file: {output_dir}/cfg.json", file=sys.stdout)
+        # Reproducibility
+        print(f"# Reproducibility\nSetting random seed to {args.seed}", file=sys.stdout)
+        torch.manual_seed(args.seed)
+        random.seed(args.seed)
+        np.random.seed(args.seed)    
 
-    # Make dirs
-    pathlib.Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    json.dump(cfg, open(f"{args.output_dir}/cfg.json", "w"), indent=4)
-    #copyfile(cfg_file, f"{args.output_dir}/cfg.json")
-    
-    # Preparing data
-    print("# Preparing MNIST (may take some time the first time)", file=sys.stderr)
-    train_loader, valid_loader, test_loader = load_mnist(
-        args.batch_size, 
-        save_to=args.data_dir, 
-        height=args.height, 
-        width=args.width
-    )
+        
+        # Preparing data
+        print("# Preparing MNIST (may take some time the first time)", file=sys.stdout)
+        train_loader, valid_loader, test_loader = load_mnist(
+            args.batch_size, 
+            save_to=args.data_dir, 
+            height=args.height, 
+            width=args.width
+        )
 
-    print("# Building model", file=sys.stderr)
-    state = make_state(
-        args, 
-        device=args.device, 
-        ckpt_path=f"{args.output_dir}/training.ckpt" if args.load_ckpt else None, 
-        load_opt=not args.reset_opt
-    )
-    #print(f"Generative model\n{state.p}", file=sys.stderr)
-    #print(f"Inference model\n{state.q}", file=sys.stderr)
+        print("# Building model", file=sys.stdout)
+        state = make_state(
+            args, 
+            device=args.device, 
+            ckpt_path=f"{output_dir}/training.ckpt" if args.load_ckpt else None, 
+            load_opt=not args.reset_opt
+        )
 
-    # Training 
-    
-    # Demo 
-    print("Example:\n 2 samples from inference model", file=sys.stderr)
-    print(state.q.sample(state.p.sample((2,))[-1]), file=sys.stderr)
-    print(" their log probability density under q", file=sys.stderr)
-    print(state.q.log_prob(
-        torch.zeros(args.height * args.width, device=torch.device(args.device)),
-        *state.q.sample(state.p.sample((2,))[-1]), 
-    ), file=sys.stderr)    
-   
-    
-    print("# Training", file=sys.stderr)
-    val_metrics = validate(state.vae, get_batcher(valid_loader, args), args.num_samples, compute_DR=True)
-    dr_string = ' '.join(f"{k}={v.mean():.2f}" for k, v in val_metrics[2].items())
-    print(f'Validation {0:3d}: nll={val_metrics[0]:.2f} bpd={val_metrics[1]:.2f} {dr_string}', file=sys.stderr)
-
-    if args.wandb and args.wandb_watch:
-        wandb.watch(state.p)
-        wandb.watch(state.q)
-
-    for epoch in range(args.epochs):
-
-        iterator = tqdm(get_batcher(train_loader, args))
-
-        for i, (x_obs, c_obs) in enumerate(iterator):
-            # [B, H*W]
-            x_obs = x_obs.reshape(-1, args.height * args.width)
-            
-            state.vae.train()      
-            #if i % 20 == 0:
-            #    samples, images = dict(), dict()
-            #else:
-            #    samples, images = None, None
-            samples, images = None, None
-
-            loss, ret = state.vae.loss(x_obs, c_obs, 
-                num_samples=args.training_samples, samples=samples, images=images, 
-                exact_marginal=args.exact_marginal
-            )
-
-            for k, v in ret.items():
-                state.stats_tr[k].append(v)
-
-            state.p_opt.zero_grad()
-            state.q_opt.zero_grad()        
-            loss.backward()
-
-            torch.nn.utils.clip_grad_norm_(
-                chain(state.vae.gen_parameters(), state.vae.inf_parameters()), 
-                args.grad_clip
-            )        
-            state.p_opt.step()
-            state.q_opt.step()
-
-            iterator.set_description(f'Epoch {epoch+1:3d}/{args.epochs}')
-            iterator.set_postfix(ret)
-
-            if args.wandb and i % 50 == 0:
-                wandb.log({f"training.{k}": v for k, v in ret.items()}, commit=False)
-                if samples:
-                    wandb.log({f"training.{k}": v for k, v in samples.items()}, commit=False)
-                if images:
-                    wandb.log({f"training.{k}": wandb.Image(v) for k, v in images.items()})
-
-
+        # Training 
+        
+        # Demo 
+        print("Example:\n 2 samples from inference model", file=sys.stdout)
+        print(state.q.sample(state.p.sample((2,))[-1]), file=sys.stdout)
+        print(" their log probability density under q", file=sys.stdout)
+        print(state.q.log_prob(
+            torch.zeros(args.height * args.width, device=torch.device(args.device)),
+            *state.q.sample(state.p.sample((2,))[-1]), 
+        ), file=sys.stdout)    
+       
+        
+        print("# Training", file=sys.stdout)
         val_metrics = validate(state.vae, get_batcher(valid_loader, args), args.num_samples, compute_DR=True)
-        state.stats_val['val_nll'].append(val_metrics[0])
-        state.stats_val['val_bpd'].append(val_metrics[1])
-        for k, v in val_metrics[2].items():
-            state.stats_val[f'val_{k}'].append(v.mean())
         dr_string = ' '.join(f"{k}={v.mean():.2f}" for k, v in val_metrics[2].items())
-        print(f'Validation {epoch+1:3d}: nll={val_metrics[0]:.2f} bpd={val_metrics[1]:.2f} {dr_string}', file=sys.stderr)
-        if args.wandb:
+        print(f'Validation {0:3d}: nll={val_metrics[0]:.2f} bpd={val_metrics[1]:.2f} {dr_string}', file=sys.stdout)
+
+        best_val_nll = np.min(state.stats_val['val_nll']) if state.stats_val['val_nll'] else np.inf
+
+        for epoch in range(args.epochs):
+
+            iterator = tqdm(get_batcher(train_loader, args))
+
+            for i, (x_obs, c_obs) in enumerate(iterator):
+                # [B, H*W]
+                x_obs = x_obs.reshape(-1, args.height * args.width)
+                
+                state.vae.train()      
+                #if i % 20 == 0:
+                #    samples, images = dict(), dict()
+                #else:
+                #    samples, images = None, None
+                samples, images = None, None
+
+                loss, ret = state.vae.loss(x_obs, c_obs, 
+                    num_samples=args.training_samples, samples=samples, images=images, 
+                    exact_marginal=args.exact_marginal
+                )
+
+                for k, v in ret.items():
+                    state.stats_tr[k].append(v)
+
+                state.p_opt.zero_grad()
+                state.q_opt.zero_grad()        
+                loss.backward()
+
+                torch.nn.utils.clip_grad_norm_(
+                    chain(state.vae.gen_parameters(), state.vae.inf_parameters()), 
+                    args.grad_clip
+                )        
+                state.p_opt.step()
+                state.q_opt.step()
+
+                iterator.set_description(f'Epoch {epoch+1:3d}/{args.epochs}')
+                iterator.set_postfix(ret)
+
+                if i % 50 == 0:
+                    wandb.log({f"training.{k}": v for k, v in ret.items()}, commit=False)
+                    if samples:
+                        wandb.log({f"training.{k}": v for k, v in samples.items()}, commit=False)
+                    if images:
+                        wandb.log({f"training.{k}": wandb.Image(v) for k, v in images.items()})
+
+
+            val_metrics = validate(state.vae, get_batcher(valid_loader, args), args.num_samples, compute_DR=True)
+            state.stats_val['val_nll'].append(val_metrics[0].item())
+            state.stats_val['val_bpd'].append(val_metrics[1].item())
+            for k, v in val_metrics[2].items():
+                state.stats_val[f'val_{k}'].append(v.mean().item())
+            dr_string = ' '.join(f"{k}={v.mean():.2f}" for k, v in val_metrics[2].items())
+            print(f'Validation {epoch+1:3d}: nll={val_metrics[0]:.2f} bpd={val_metrics[1]:.2f} {dr_string}', file=sys.stdout)
+            
+            
             wandb.log({'val.nll': val_metrics[0], 'val.bpd': val_metrics[1]}, commit=False)
             wandb.log({f"val.{k}": v for k, v in val_metrics[2].items()})
-        
-        torch.save({
-            'p_state_dict': state.p.state_dict(),
-            'q_state_dict': state.q.state_dict(),
-            'p_opt_state_dict': state.p_opt.state_dict(),
-            'q_opt_state_dict': state.q_opt.state_dict(),
-            'stats_tr': state.stats_tr,
-            'stats_val': state.stats_val,
-        }, f"{args.output_dir}/training.ckpt")
-    
-    
-    #np_stats_tr = {k: np.array(v) for k, v in stats_tr.items()}
-    #np_stats_val = {k: np.array(v) for k, v in stats_val.items()}
-    
-#     torch.save({
-#         'epoch': epoch + 1,
-#         'p_state_dict': p.state_dict(),
-#         'q_state_dict': p.state_dict(),
-#         'p_opt_state_dict': p_opt.state_dict(),
-#         'q_opt_state_dict': p_opt.state_dict(),
-#         'stats_tr': stats_tr,
-#         'stats_val': stats_val,
-#     }, f"{args.output_dir}/training.ckpt")
-    
+            
+            save_state(state, output_dir/"ckpt.last")
+            wandb.save(output_dir/"ckpt.last")
+            current_val_nll = state.stats_val['val_nll'][-1]
+            if current_val_nll < best_val_nll:
+                print(f"Saving new best model (val_nll): old={best_val_nll} new={current_val_nll}")
+                best_val_nll = current_val_nll 
+                save_state(state, output_dir/"ckpt.best")
+                wandb.save(output_dir/"ckpt.best")
 
-    #print(tabulate(
-    #    [(k, np.mean(v[-100:]), np.min(v[-100:])) for k, v in np_stats_val.items()],
-    #    headers=['metric', 'mean', 'min']
-    #))
-    
-    print("# Final validation run")
-    val_nll, val_bpd, val_DR = validate(
-        state.vae, get_batcher(valid_loader, args), args.num_samples, compute_DR=True)
-    rows = [('NLL', val_nll, None), ('BPD', val_bpd, None)]
-    for k, v in val_DR.items():
-        rows.append((k, v.mean(), v.std()))
-    print(tabulate(rows, headers=['metric', 'mean', 'std']))    
-    return rows, ['metric', 'mean', 'std']
-    
-#     print("Final test run")
-#     test_nll, test_bpd, test_DR = validate(
-#         vae, get_batcher(test_loader, args), args.num_samples, compute_DR=True)
-#     rows = [('IS-NLL', test_nll, None), ('IS-BPD', test_bpd, None)]
-#     for k, v in test_DR.items():
-#         rows.append((k, v.mean(), v.std()))
-#     print(tabulate(rows, headers=['metric', 'mean', 'std']))    
+        
+        #np_stats_tr = {k: np.array(v) for k, v in stats_tr.items()}
+        #np_stats_val = {k: np.array(v) for k, v in stats_val.items()}
+        
+    #     torch.save({
+    #         'epoch': epoch + 1,
+    #         'p_state_dict': p.state_dict(),
+    #         'q_state_dict': p.state_dict(),
+    #         'p_opt_state_dict': p_opt.state_dict(),
+    #         'q_opt_state_dict': p_opt.state_dict(),
+    #         'stats_tr': stats_tr,
+    #         'stats_val': stats_val,
+    #     }, f"{output_dir}/training.ckpt")
+        
+
+        #print(tabulate(
+        #    [(k, np.mean(v[-100:]), np.min(v[-100:])) for k, v in np_stats_val.items()],
+        #    headers=['metric', 'mean', 'min']
+        #))
+        
+        print("# Final validation run")
+        val_nll, val_bpd, val_DR = validate(
+            state.vae, get_batcher(valid_loader, args), args.num_samples, compute_DR=True)
+        rows = [('NLL', val_nll, None), ('BPD', val_bpd, None)]
+        for k, v in val_DR.items():
+            rows.append((k, v.mean(), v.std()))
+        print(tabulate(rows, headers=['metric', 'mean', 'std']))    
+        return rows, ['metric', 'mean', 'std']
+        
+    #     print("Final test run")
+    #     test_nll, test_bpd, test_DR = validate(
+    #         vae, get_batcher(test_loader, args), args.num_samples, compute_DR=True)
+    #     rows = [('IS-NLL', test_nll, None), ('IS-BPD', test_bpd, None)]
+    #     for k, v in test_DR.items():
+    #         rows.append((k, v.mean(), v.std()))
+    #     print(tabulate(rows, headers=['metric', 'mean', 'std']))    
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print(f"Usage: python {sys.argv[0]} cfg (loadckpt) (resetopt)")
-        print(" after the cfg file, you can use some optional commands:")
-        print(" * loadckpt")
-        print(" * resetopt")
-        
+        print(f"Usage: python {sys.argv[0]} cfg")
         sys.exit()
-    main(sys.argv[1], load_ckpt='loadckpt' in sys.argv[2:], reset_opt='resetopt' in sys.argv[2:], seed=22)
+    main(load_cfg(sys.argv[1]))
+            

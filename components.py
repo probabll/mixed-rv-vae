@@ -439,24 +439,24 @@ class VAE:
     def inf_parameters(self):
         return self.q.parameters()   
     
-    def critic(self, x_obs, z, q_F, num_samples=1):
+    def critic(self, x_obs, z, q_F):
         """This estimates reward (w.r.t sampling of F) on a single sample for variance reduction"""
-        S, B, H, K, D = num_samples, x_obs.shape[0], self.p.z_dim, self.p.y_dim, self.p.data_dim
+        S, B, H, K, D = x_obs.shape[0], x_obs.shape[1], self.p.z_dim, self.p.y_dim, self.p.data_dim
         with torch.no_grad():            
             # Approximate posteriors and samples
             # [S, B, K]
-            f = q_F.sample()  # we resample f
+            f = q_F.sample((S,))  # we resample f
             assert_shape(f, (S, B, K), "f ~ F|X=x, \lambda")
             q_Y = self.q.Y(x=x_obs, f=f)  # and thus also resample y
-            if q_Y.batch_shape != (S, B):
-                q_Y = q_Y.expand((S, B))
+            #if q_Y.batch_shape != (S, B):
+            #    q_Y = q_Y.expand((S, B))
             # [S, B, K]
             y = q_Y.sample() 
             assert_shape(y, (S, B, K), "y ~ Y|X=x, F=f, \lambda")
             if not self.q.mean_field:
                 q_Z = self.q.Z(x=x_obs, y=y)
-                if q_Z.batch_shape != (S,B):
-                    q_Z = q_Z.expand((S, B))
+                #if q_Z.batch_shape != (S,B):
+                #    q_Z = q_Z.expand((S, B))
                 # [S, B, H]
                 z = q_Z.sample()  # and thus also resample z
                 assert_shape(z, (S, B, H), "z ~ Z|X=x, Y=y, \lambda")
@@ -680,7 +680,7 @@ class VAE:
                     criticised_reward = reward - critic.detach() 
                 else:
                     # [S, B]
-                    criticised_reward = reward - self.critic(x_obs, z=z, q_F=q_F, num_samples=num_samples).detach()
+                    criticised_reward = reward - self.critic(x_obs, z=z, q_F=q_F).detach()
             else:
                 criticised_reward = reward
             if self.use_reward_standardisation:
