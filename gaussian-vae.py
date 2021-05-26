@@ -8,10 +8,10 @@ rows, headers = train(
     load_cfg(
         f'cfg/{name}.json', 
         seed=10, 
-        output_dir=f'neurips-mixed-rv/cmp/{name}/debug-gsp', 
+        output_dir=f'neurips-mixed-rv/cmp/gaussian-sparsemax', 
         device='cuda:0', 
         wandb=False, 
-        epochs=4,
+        epochs=10,
         batch_size=10,
         num_samples=10,
         #prior_z="gaussian 0.0 1.0",

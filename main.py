@@ -239,7 +239,7 @@ def main(cfg: dict):
     #    print(f"Output directory: {cfg['output_dir']}", file=sys.stdout)
     #args = namedtuple('Config', cfg.keys())(*cfg.values())
     
-    with wandb.init(config=cfg):
+    with wandb.init(config=cfg, project='neurips21'):
         args = wandb.config
         # Config
         cfg['output_dir'] = f"{cfg['output_dir']}/{wandb.run.name}"
@@ -352,13 +352,13 @@ def main(cfg: dict):
             wandb.log({f"val.{k}": v for k, v in val_metrics[2].items()})
             
             save_state(state, output_dir/"ckpt.last")
-            wandb.save(output_dir/"ckpt.last")
+            #wandb.save(output_dir/"ckpt.last")
             current_val_nll = state.stats_val['val_nll'][-1]
             if current_val_nll < best_val_nll:
                 print(f"Saving new best model (val_nll): old={best_val_nll} new={current_val_nll}")
                 best_val_nll = current_val_nll 
                 save_state(state, output_dir/"ckpt.best")
-                wandb.save(output_dir/"ckpt.best")
+                #wandb.save(output_dir/"ckpt.best")
 
         
         #np_stats_tr = {k: np.array(v) for k, v in stats_tr.items()}
