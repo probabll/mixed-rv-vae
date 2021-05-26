@@ -14,7 +14,7 @@
     "shared_concentrations": true,
     "mean_field": true,
     "hidden_enc_size": 500,    
-    "epochs": 50,    
+    "epochs": 500,    
     "num_samples": 100,    
     "gen_opt": "adam",
     "gen_lr": 5e-4,
