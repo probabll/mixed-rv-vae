@@ -109,6 +109,7 @@ def default_cfg():
         output_dir='.',
         wandb=False,
         wandb_watch=False,
+        tqdm=False,
         # CUDA
         seed=42,
         device='cuda:0',
@@ -297,7 +298,10 @@ def main(cfg: dict):
 
         for epoch in range(args.epochs):
 
-            iterator = tqdm(get_batcher(train_loader, args))
+            if args.tqdm:
+                iterator = tqdm(get_batcher(train_loader, args))
+            else:
+                iterator = iter(get_batcher(train_loader, args))
 
             for i, (x_obs, c_obs) in enumerate(iterator):
                 # [B, H*W]
@@ -329,8 +333,9 @@ def main(cfg: dict):
                 state.p_opt.step()
                 state.q_opt.step()
 
-                iterator.set_description(f'Epoch {epoch+1:3d}/{args.epochs}')
-                iterator.set_postfix(ret)
+                if args.tqdm:
+                    iterator.set_description(f'Epoch {epoch+1:3d}/{args.epochs}')
+                    iterator.set_postfix(ret)
 
                 if i % 50 == 0:
                     wandb.log({f"training.{k}": v for k, v in ret.items()}, commit=False)
