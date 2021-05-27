@@ -275,7 +275,7 @@ class InferenceModel(nn.Module):
                  posterior_z='gaussian', 
                  posterior_f='gibbs -10 10',
                  posterior_y='dirichlet 1e-3 1e3',
-                 mean_field=True, shared_concentrations=True):
+                 mean_field=True, shared_concentrations=True, share_fy_net=False):
         assert z_dim + y_dim > 0
         assert parse_posterior_name(posterior_z)[0] in ['gaussian', 'dirichlet', 'concrete', 'onehotcat', 'gaussian-sparsemax'], "Unknown choice of distribution for Z|x"
         assert parse_posterior_name(posterior_f)[0] in ['gibbs'], "Unknown choice of distribution for F|x"
@@ -292,6 +292,7 @@ class InferenceModel(nn.Module):
 
         self._mean_field = mean_field
         self._shared_concentrations = shared_concentrations
+        self._share_fy_net = share_fy_net
         
         if z_dim: 
             z_num_params = 2 * z_dim if self._z_dist in ['gaussian', 'gaussian-sparsemax'] else z_dim
@@ -306,27 +307,38 @@ class InferenceModel(nn.Module):
             )
         
         if y_dim:
-            self._scores_net = nn.Sequential(
-                nn.Dropout(p_drop),
-                nn.Linear(data_dim, hidden_enc_size),
-                nn.ReLU(),
-                nn.Dropout(p_drop),
-                nn.Linear(hidden_enc_size, hidden_enc_size),
-                nn.ReLU(),
-                nn.Linear(hidden_enc_size, y_dim)
-            )
+            if shared_concentrations and share_fy_net:
+                self._scores_and_concs_net = nn.Sequential(
+                    nn.Dropout(p_drop),
+                    nn.Linear(data_dim, hidden_enc_size),
+                    nn.ReLU(),
+                    nn.Dropout(p_drop),
+                    nn.Linear(hidden_enc_size, hidden_enc_size),
+                    nn.ReLU(),
+                    nn.Linear(hidden_enc_size, y_dim * 2)
+                )
+            else:
+                self._scores_net = nn.Sequential(
+                    nn.Dropout(p_drop),
+                    nn.Linear(data_dim, hidden_enc_size),
+                    nn.ReLU(),
+                    nn.Dropout(p_drop),
+                    nn.Linear(hidden_enc_size, hidden_enc_size),
+                    nn.ReLU(),
+                    nn.Linear(hidden_enc_size, y_dim)
+                )
 
-            self._concentrations_net = nn.Sequential(
-                nn.Dropout(p_drop),
-                nn.Linear(data_dim if shared_concentrations else y_dim + data_dim, hidden_enc_size),
-                nn.ReLU(),
-                nn.Dropout(p_drop),
-                nn.Linear(hidden_enc_size, hidden_enc_size),
-                nn.ReLU(),
-                nn.Dropout(p_drop),
-                nn.Linear(hidden_enc_size, y_dim),
-                nn.Softplus()
-            )
+                self._concentrations_net = nn.Sequential(
+                    nn.Dropout(p_drop),
+                    nn.Linear(data_dim if shared_concentrations else y_dim + data_dim, hidden_enc_size),
+                    nn.ReLU(),
+                    nn.Dropout(p_drop),
+                    nn.Linear(hidden_enc_size, hidden_enc_size),
+                    nn.ReLU(),
+                    nn.Dropout(p_drop),
+                    nn.Linear(hidden_enc_size, y_dim),
+                    nn.Softplus()
+                )
                 
     @property
     def mean_field(self):
@@ -382,7 +394,10 @@ class InferenceModel(nn.Module):
         if not self._y_dim:
             return td.Independent(pd.Delta(torch.zeros(x.shape[:-1] + (0,), device=x.device)), 1)
         # [B, K]
-        scores = self._scores_net(x) 
+        if self._shared_concentrations and self._share_fy_net:
+            scores = self._scores_and_concs_net(x)[...,:self._y_dim]
+        else:
+            scores = self._scores_net(x) 
         if len(self._f_params) == 2: # we are clamping scores
             scores = torch.clamp(scores, self._f_params[0], self._f_params[1])
             #scores = torch.tanh(scores) * 10.0
@@ -395,15 +410,20 @@ class InferenceModel(nn.Module):
             return td.Independent(pd.Delta(torch.zeros_like(f)), 1)
         if self._shared_concentrations:
             inputs = x  # [...,D]
+            if self._share_fy_net:
+                concentration = self._scores_and_concs_net(x)[...,self._y_dim:]
+            else:
+                concentration = self._concentrations_net(inputs) 
         else:
             inputs = torch.cat([f, x], -1)  # [...,K+D]
-        # [...,K]
-        concentration = self._concentrations_net(inputs) 
+            # [...,K]
+            concentration = self._concentrations_net(inputs) 
         if len(self._y_params) == 2:  # we are clamping concentrations
             concentration = torch.clamp(concentration, self._y_params[0], self._y_params[1])
             #concentration = torch.sigmoid(concentration) * 10.0
         return pd.MaskedDirichlet(f.bool(), concentration)
-    
+
+
     def sample(self, x, sample_shape=torch.Size([])):
         """Return (f, y, z), No gradients through this."""
         with torch.no_grad():            

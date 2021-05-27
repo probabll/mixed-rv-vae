@@ -45,6 +45,7 @@ def get_args():
     parser.add_argument('--posterior_f', default='gibbs -10 10', type=str)
     parser.add_argument('--posterior_y', default='dirichlet 1e-3 1e3', type=str)
     parser.add_argument('--shared_concentrations', default=True, type=str2bool)
+    parser.add_argument('--share_fy_net', default=False, type=str2bool)
     parser.add_argument('--mean_field', default=True, type=str2bool)
     parser.add_argument('--hidden_enc_size', default=500, type=int)
     parser.add_argument('--epochs', default=200, type=int)
@@ -111,6 +112,7 @@ def make_state(args, device: str, ckpt_path=None, load_opt=True):
         data_dim=args.height * args.width, 
         hidden_enc_size=args.hidden_enc_size,
         shared_concentrations=args.shared_concentrations,
+        share_fy_net=args.share_fy_net,
         p_drop=args.inf_p_drop,
         posterior_f=args.posterior_f,
         posterior_y=args.posterior_y,
@@ -167,6 +169,8 @@ def default_cfg():
         wandb=False,
         wandb_watch=False,
         tqdm=False,
+        project="neurips21",
+        cfg=None,
         # CUDA
         seed=42,
         device='cuda:0',
@@ -182,6 +186,7 @@ def default_cfg():
         posterior_f='gibbs -10 10',
         posterior_y='dirichlet 1e-3 1e3',
         shared_concentrations=True,
+        share_fy_net=False,
         mean_field=False,
         hidden_enc_size=500,    
         # Training

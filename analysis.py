@@ -13,7 +13,10 @@ def bitvec2str(f, as_set=False):
     return ''.join('1' if b else '0' for b in f) if not as_set else '{' + ','.join(f'{i:1d}' for i, b in enumerate(f, 1) if b) + '}'
 
 
-def compare_marginals(vae, batcher, args, cols=5, exact_marginals=False): 
+def compare_marginals(vae, batcher, args, cols=5, exact_marginals=False, num_samples=None): 
+    if num_samples is None:
+        num_samples = args.num_samples
+
     with torch.no_grad():
         vae.eval()        
     
@@ -189,9 +192,12 @@ def compare_marginals(vae, batcher, args, cols=5, exact_marginals=False):
             _ = plt.legend()
             plt.show()
 
-def compare_samples(vae, batcher, args, N=4, num_figs=1): 
+def compare_samples(vae, batcher, args, N=4, num_figs=1, num_samples=None): 
 
     assert N <= args.batch_size, "N should be no bigger than a batch"
+    if num_samples is None:
+        num_samples = args.num_samples
+
     with torch.no_grad():
         vae.p.eval()        
         vae.q.eval()
@@ -211,7 +217,7 @@ def compare_samples(vae, batcher, args, N=4, num_figs=1):
             
             B, H, K, D = x_obs.shape[0], vae.p.z_dim, vae.p.y_dim, vae.p.data_dim            
             # marginal probability
-            prob = vae.estimate_ll_per_bit(x_obs, args.num_samples).exp()            
+            prob = vae.estimate_ll_per_bit(x_obs, num_samples).exp()            
             # posterior samples
             f, y, z = vae.q.sample(x_obs)
             x = vae.p.X(y=y, z=z).sample()
@@ -245,7 +251,7 @@ def compare_samples(vae, batcher, args, N=4, num_figs=1):
             if r == num_figs:
                 break
                 
-def samples_per_digit(vae, batcher, args): 
+def samples_per_digit(vae, batcher, args, return_marginal=False): 
 
     with torch.no_grad():
         vae.p.eval()        
@@ -255,6 +261,7 @@ def samples_per_digit(vae, batcher, args):
         groups_y = defaultdict(list)
         groups_z = defaultdict(list)
         groups_x = defaultdict(list)
+        groups_marginal_f = defaultdict(list)
         # Some visualisations
         for r, (x_obs, c_obs) in enumerate(batcher, 1):
             
@@ -265,6 +272,13 @@ def samples_per_digit(vae, batcher, args):
             # posterior samples
             f, y, z = vae.q.sample(x_obs)
             x = vae.p.X(y=y, z=z).sample()
+            
+            if return_marginal:
+                # [sample_shape, B, K]
+                F = vae.q.F(x)
+                marginal_f = F.marginals()
+            else:
+                marginal_f = torch.zeros_like(f)
 
             for n in range(x_obs.shape[0]):
                 c = c_obs[n].item()
@@ -272,12 +286,13 @@ def samples_per_digit(vae, batcher, args):
                 groups_y[c].append(y[n].cpu().numpy())
                 groups_z[c].append(z[n].cpu().numpy())
                 groups_x[c].append(x[n].cpu().numpy())
+                groups_marginal_f[c].append(marginal_f[n].cpu().numpy())
       
     def trim(samples: dict):
         samples = [np.stack(vecs) for c, vecs in sorted(samples.items(), key=lambda pair: pair[0])]
         size = min(v.shape[0] for v in samples)
         return np.array([v[np.random.choice(v.shape[0], size, replace=False)] for v in samples])
     
-    return trim(groups_f), trim(groups_y), trim(groups_z), trim(groups_x)
+    return trim(groups_f), trim(groups_y), trim(groups_z), trim(groups_x), trim(groups_marginal_f)
         
                 
