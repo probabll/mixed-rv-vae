@@ -17,6 +17,63 @@ from itertools import chain
 from components import GenerativeModel, InferenceModel, VAE
 from data import load_mnist
 from data import Batcher
+import argparse
+import distutils
+
+
+def get_args():
+    
+    str2bool = lambda x: distutils.util.strtobool(x)
+
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--project', default='neurips21', type=str)
+    parser.add_argument('--cfg', default=None, type=str)
+    parser.add_argument('--output_dir', default='.', type=str)
+    parser.add_argument('--batch_size', default=200, type=int)
+    parser.add_argument('--data_dir', default='tmp', type=str)
+    parser.add_argument('--height', default=28, type=int)
+    parser.add_argument('--width', default=28, type=int)
+    parser.add_argument('--seed', default=10, type=int)
+    parser.add_argument('--device', default='cuda:0', type=str)
+    parser.add_argument('--z_dim', default=32, type=int)
+    parser.add_argument('--prior_z', default='gaussian 0.0 1.0', type=str)
+    parser.add_argument('--y_dim', default=0, type=int)
+    parser.add_argument('--prior_f', default='gibbs 0.0', type=str)
+    parser.add_argument('--prior_y', default='dirichlet 1.0', type=str)
+    parser.add_argument('--hidden_dec_size', default=500, type=int)
+    parser.add_argument('--posterior_z', default='gaussian', type=str)
+    parser.add_argument('--posterior_f', default='gibbs -10 10', type=str)
+    parser.add_argument('--posterior_y', default='dirichlet 1e-3 1e3', type=str)
+    parser.add_argument('--shared_concentrations', default=True, type=str2bool)
+    parser.add_argument('--mean_field', default=True, type=str2bool)
+    parser.add_argument('--hidden_enc_size', default=500, type=int)
+    parser.add_argument('--epochs', default=200, type=int)
+    parser.add_argument('--training_samples', default=1, type=int)
+    parser.add_argument('--num_samples', default=100, type=int)
+    parser.add_argument('--gen_opt', default='adam', choices=['adam', 'rmsprop'], type=str)
+    parser.add_argument('--gen_lr', default=1e-4, type=float)
+    parser.add_argument('--gen_l2', default=0., type=float)
+    parser.add_argument('--gen_p_drop', default=0., type=float)
+    parser.add_argument('--inf_opt', default='adam', choices=['adam', 'rmsprop'], type=str)
+    parser.add_argument('--inf_lr', default=1e-4, type=float)
+    parser.add_argument('--inf_l2', default=0., type=float)
+    parser.add_argument('--inf_p_drop', default=0.1, type=float)
+    parser.add_argument('--grad_clip', default=5., type=float)
+    parser.add_argument('--load_ckpt', default=False, type=str2bool)
+    parser.add_argument('--reset_opt', default=False, type=str2bool)
+    parser.add_argument('--exact_marginal', default=False, type=str2bool)
+    parser.add_argument('--use_self_critic', default=False, type=str2bool)
+    parser.add_argument('--use_reward_standardisation', default=False, type=str2bool)
+    parser.add_argument('--tqdm', default=False, type=str2bool)
+    
+    args = parser.parse_args()
+    if args.cfg:
+        with open(args.cfg, 'r') as f:
+            t_args = argparse.Namespace()
+            t_args.__dict__.update(json.load(f))
+            args = parser.parse_args(namespace=t_args)
+
+    return args
 
 
 def get_optimiser(choice, params, lr, weight_decay, momentum=0.0):    
@@ -233,15 +290,16 @@ def save_state(state, path):
         'stats_val': state.stats_val,
     }, path)
 
-def main(cfg: dict):
+def main(args):
     
     #if cfg.get('wandb', False):
     #    wandb.init(project='neurips21', config=cfg)
     #    cfg['output_dir'] = f"{cfg['output_dir']}/{wandb.run.name}"
     #    print(f"Output directory: {cfg['output_dir']}", file=sys.stdout)
     #args = namedtuple('Config', cfg.keys())(*cfg.values())
+    cfg = vars(args)
     
-    with wandb.init(config=cfg, project='neurips21'):
+    with wandb.init(config=cfg, project=args.project):
         args = wandb.config
         # Config
         cfg['output_dir'] = f"{cfg['output_dir']}/{wandb.run.name}"
@@ -404,8 +462,6 @@ def main(cfg: dict):
     #     print(tabulate(rows, headers=['metric', 'mean', 'std']))    
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
-        print(f"Usage: python {sys.argv[0]} cfg")
-        sys.exit()
-    main(load_cfg(sys.argv[1]))
+    #main(load_cfg(sys.argv[1]))
+    main(get_args())
             
