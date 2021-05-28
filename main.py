@@ -60,7 +60,7 @@ def get_args():
     parser.add_argument('--inf_l2', default=0., type=float)
     parser.add_argument('--inf_p_drop', default=0.1, type=float)
     parser.add_argument('--grad_clip', default=5., type=float)
-    parser.add_argument('--load_ckpt', default=False, type=str2bool)
+    parser.add_argument('--load_ckpt', default=None, type=str)
     parser.add_argument('--reset_opt', default=False, type=str2bool)
     parser.add_argument('--exact_marginal', default=False, type=str2bool)
     parser.add_argument('--use_self_critic', default=False, type=str2bool)
@@ -204,7 +204,7 @@ def default_cfg():
         inf_l2=0.0,  
         inf_p_drop=0.0,  # dropout for inference model is not well understood    
         grad_clip=5.0,
-        load_ckpt=False,
+        load_ckpt=None,
         reset_opt=False,
         # Variance reduction
         exact_marginal=False,
@@ -336,7 +336,7 @@ def main(args):
         state = make_state(
             args, 
             device=args.device, 
-            ckpt_path=f"{output_dir}/training.ckpt" if args.load_ckpt else None, 
+            ckpt_path=args.load_ckpt,
             load_opt=not args.reset_opt
         )
 
@@ -358,6 +358,13 @@ def main(args):
         print(f'Validation {0:3d}: nll={val_metrics[0]:.2f} bpd={val_metrics[1]:.2f} {dr_string}', file=sys.stdout)
 
         best_val_nll = np.min(state.stats_val['val_nll']) if state.stats_val['val_nll'] else np.inf
+
+        p_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            state.p_opt, mode='min', factor=0.1, patience=10, threshold=0.1, verbose=True,
+        )
+        q_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            state.q_opt, mode='min', factor=0.1, patience=10, threshold=0.1, verbose=True
+        )
 
         for epoch in range(args.epochs):
 
@@ -409,6 +416,10 @@ def main(args):
 
 
             val_metrics = validate(state.vae, get_batcher(valid_loader, args), args.num_samples, compute_DR=True)
+    
+            #p_scheduler.step(val_metrics[0])
+            #q_scheduler.step(val_metrics[0])
+
             state.stats_val['val_nll'].append(val_metrics[0].item())
             state.stats_val['val_bpd'].append(val_metrics[1].item())
             for k, v in val_metrics[2].items():

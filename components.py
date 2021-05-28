@@ -34,6 +34,8 @@ def parse_prior_name(string):
         raise ValueError("A Gibbs prior takes one parameter (score)")
     if dist == 'gibbs-max-ent' and len(params) != 1:
         raise ValueError("A Gibbs prior takes one parameter (precision)")
+    if dist == 'categorical' and len(params) != 1:
+        raise ValueError("A Categorical prior takes one parameter (logit)")
     if dist == 'concrete' and len(params) != 2:
         raise ValueError("A Concrete prior takes two parameters (temperature, logit)")
     if dist == 'onehotcat' and len(params) != 2:
@@ -104,8 +106,8 @@ class GenerativeModel(nn.Module):
         
         assert z_dim + y_dim > 0
         assert self._z_dist in ['gaussian', 'dirichlet', 'concrete', 'onehotcat', 'gaussian-sparsemax-max-ent'], f"Unknown choice of distribution for Z: {self._z_dist}"
-        assert self._f_dist in ['gibbs', 'gibbs-max-ent'], f"Unknown choice of distribution for F: {self._f_dist}"
-        assert self._y_dist in ['dirichlet'], f"Unknown choice of distribution for Y|f: {self._y_dist}"
+        assert self._f_dist in ['gibbs', 'gibbs-max-ent', 'categorical'], f"Unknown choice of distribution for F: {self._f_dist}"
+        assert self._y_dist in ['dirichlet', 'identity'], f"Unknown choice of distribution for Y|f: {self._y_dist}"
 
         # TODO: support TransposedCNN?
         self._decoder = nn.Sequential(
@@ -144,10 +146,13 @@ class GenerativeModel(nn.Module):
             elif self._f_dist == 'gibbs-max-ent':
                 self.register_buffer("_prior_f_pmf_n", pd.MaxEntropyFaces.pmf_n(y_dim, self._f_params[0]).detach())
                 p = pd.MaxEntropyFaces(self._prior_f_pmf_n)
+            elif self._f_dist == 'categorical':
+                self.register_buffer("_prior_f_logits", (torch.zeros(y_dim, requires_grad=False) + self._f_params[0]).detach())
             if self._y_dist == 'dirichlet':
                 if self._y_params[0] <= 0:
                     raise ValueError("The Dirichlet concentration for Y|F=f must be strictly positive")
                 self.register_buffer("_prior_y_concentration", (torch.zeros(1, requires_grad=False) + self._y_params[0]).detach())
+
         else:
             self.register_buffer("_prior_f_location", (torch.zeros(0, requires_grad=False)).detach())
             self.register_buffer("_prior_y_location", (torch.zeros(0, requires_grad=False)).detach())
@@ -200,6 +205,8 @@ class GenerativeModel(nn.Module):
                 return pd.NonEmptyBitVector(scores=self._prior_f_scores)
             elif self._f_dist == 'gibbs-max-ent':
                 return pd.MaxEntropyFaces(pmf_n=self._prior_f_pmf_n)
+            elif self._f_dist == 'categorical':
+                return td.OneHotCategorical(logits=self._prior_f_logits)
         else:
             return td.Independent(pd.Delta(self._prior_f_location), 1)
 
@@ -210,7 +217,10 @@ class GenerativeModel(nn.Module):
         :param predictors: input predictors, this is reserved for future use
         """
         if self._y_dim:
-            return pd.MaskedDirichlet(f.bool(), self._prior_y_concentration * torch.ones_like(f))
+            if self._y_dist == 'dirichlet':
+                return pd.MaskedDirichlet(f.bool(), self._prior_y_concentration * torch.ones_like(f))
+            elif self._y_dist == 'identity':
+                return td.Independent(pd.Delta(f), 1)
         else:
             return td.Independent(pd.Delta(torch.zeros_like(f)), 1)
 
@@ -278,8 +288,8 @@ class InferenceModel(nn.Module):
                  mean_field=True, shared_concentrations=True, share_fy_net=False):
         assert z_dim + y_dim > 0
         assert parse_posterior_name(posterior_z)[0] in ['gaussian', 'dirichlet', 'concrete', 'onehotcat', 'gaussian-sparsemax'], "Unknown choice of distribution for Z|x"
-        assert parse_posterior_name(posterior_f)[0] in ['gibbs'], "Unknown choice of distribution for F|x"
-        assert parse_posterior_name(posterior_y)[0] in ['dirichlet'], "Unknown choice of distribution for Y|f,x"
+        assert parse_posterior_name(posterior_f)[0] in ['gibbs', 'categorical'], "Unknown choice of distribution for F|x"
+        assert parse_posterior_name(posterior_y)[0] in ['dirichlet', 'identity'], "Unknown choice of distribution for Y|f,x"
 
         super().__init__()
                 
@@ -400,14 +410,20 @@ class InferenceModel(nn.Module):
             scores = self._scores_net(x) 
         if len(self._f_params) == 2: # we are clamping scores
             scores = torch.clamp(scores, self._f_params[0], self._f_params[1])
-            #scores = torch.tanh(scores) * 10.0
-        return pd.NonEmptyBitVector(scores)
+            #scores = torch.tanh(scores) * 10
+        if self._f_dist == 'gibbs':
+            return pd.NonEmptyBitVector(scores)
+        elif self._f_dist == 'categorical':
+            return td.OneHotCategorical(logits=scores)
 
 
     def Y(self, x, f, predictors=None):
         x, f = self._match_sample_shape(x, f)
         if not self._y_dim:
             return td.Independent(pd.Delta(torch.zeros_like(f)), 1)
+        if self._y_dist == 'identity':
+            return td.Independent(pd.Delta(f), 1)
+            
         if self._shared_concentrations:
             inputs = x  # [...,D]
             if self._share_fy_net:
@@ -420,7 +436,7 @@ class InferenceModel(nn.Module):
             concentration = self._concentrations_net(inputs) 
         if len(self._y_params) == 2:  # we are clamping concentrations
             concentration = torch.clamp(concentration, self._y_params[0], self._y_params[1])
-            #concentration = torch.sigmoid(concentration) * 10.0
+            #concentration = torch.sigmoid(concentration) * 100.0
         return pd.MaskedDirichlet(f.bool(), concentration)
 
 
@@ -610,9 +626,9 @@ class VAE:
         q_F = self.q.F(x_obs)
         
         if exact_marginal:
-            S = q_F.support_size
             # [S, B, K]
             f = q_F.enumerate_support()
+            S = f.shape[0]  # rewrite S
         else:
             # [S, B, K]
             f = q_F.sample((S,)) # not rsample

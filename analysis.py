@@ -262,6 +262,8 @@ def samples_per_digit(vae, batcher, args, return_marginal=False):
         groups_z = defaultdict(list)
         groups_x = defaultdict(list)
         groups_marginal_f = defaultdict(list)
+        groups_scores = defaultdict(list)
+        groups_concs = defaultdict(list)
         # Some visualisations
         for r, (x_obs, c_obs) in enumerate(batcher, 1):
             
@@ -277,8 +279,14 @@ def samples_per_digit(vae, batcher, args, return_marginal=False):
                 # [sample_shape, B, K]
                 F = vae.q.F(x)
                 marginal_f = F.marginals()
+                scores = F.scores
+                # [sample_shape, K]
+                Y = vae.q.Y(f=f, x=x)
+                concs = Y.concentration
             else:
                 marginal_f = torch.zeros_like(f)
+                scores = torch.zeros_like(f)
+                concs = torch.zeros_like(f)
 
             for n in range(x_obs.shape[0]):
                 c = c_obs[n].item()
@@ -287,12 +295,14 @@ def samples_per_digit(vae, batcher, args, return_marginal=False):
                 groups_z[c].append(z[n].cpu().numpy())
                 groups_x[c].append(x[n].cpu().numpy())
                 groups_marginal_f[c].append(marginal_f[n].cpu().numpy())
+                groups_scores[c].append(scores[n].cpu().numpy())
+                groups_concs[c].append(concs[n].cpu().numpy())
       
     def trim(samples: dict):
         samples = [np.stack(vecs) for c, vecs in sorted(samples.items(), key=lambda pair: pair[0])]
         size = min(v.shape[0] for v in samples)
         return np.array([v[np.random.choice(v.shape[0], size, replace=False)] for v in samples])
     
-    return trim(groups_f), trim(groups_y), trim(groups_z), trim(groups_x), trim(groups_marginal_f)
+    return trim(groups_f), trim(groups_y), trim(groups_z), trim(groups_x), trim(groups_marginal_f), trim(groups_scores), trim(groups_concs)
         
                 
