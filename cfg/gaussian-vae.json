@@ -1,7 +1,6 @@
 {
     "seed": 10,
     "batch_size": 200,
-    "data_dir": "tmp",
     "height": 28,
     "width": 28, 
     "output_dir": "neurips-mixed-rv/gaussian-vae/0",

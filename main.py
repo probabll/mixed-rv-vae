@@ -1,3 +1,4 @@
+import tempfile
 import wandb
 import sys
 import json
@@ -17,67 +18,12 @@ from itertools import chain
 from components import GenerativeModel, InferenceModel, VAE
 from data import load_mnist
 from data import Batcher
-import argparse
-import distutils
+import hparams
+from typing import Iterable
 
 
-def get_args():
-    
-    str2bool = lambda x: distutils.util.strtobool(x)
-
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--project', default='neurips21', type=str)
-    parser.add_argument('--cfg', default=None, type=str)
-    parser.add_argument('--output_dir', default='.', type=str)
-    parser.add_argument('--batch_size', default=200, type=int)
-    parser.add_argument('--data_dir', default='tmp', type=str)
-    parser.add_argument('--height', default=28, type=int)
-    parser.add_argument('--width', default=28, type=int)
-    parser.add_argument('--seed', default=10, type=int)
-    parser.add_argument('--device', default='cuda:0', type=str)
-    parser.add_argument('--z_dim', default=32, type=int)
-    parser.add_argument('--prior_z', default='gaussian 0.0 1.0', type=str)
-    parser.add_argument('--y_dim', default=0, type=int)
-    parser.add_argument('--prior_f', default='gibbs 0.0', type=str)
-    parser.add_argument('--prior_y', default='dirichlet 1.0', type=str)
-    parser.add_argument('--hidden_dec_size', default=500, type=int)
-    parser.add_argument('--posterior_z', default='gaussian', type=str)
-    parser.add_argument('--posterior_f', default='gibbs -10 10', type=str)
-    parser.add_argument('--posterior_y', default='dirichlet 1e-3 1e3', type=str)
-    parser.add_argument('--shared_concentrations', default=True, type=str2bool)
-    parser.add_argument('--share_fy_net', default=False, type=str2bool)
-    parser.add_argument('--mean_field', default=True, type=str2bool)
-    parser.add_argument('--hidden_enc_size', default=500, type=int)
-    parser.add_argument('--epochs', default=200, type=int)
-    parser.add_argument('--training_samples', default=1, type=int)
-    parser.add_argument('--num_samples', default=100, type=int)
-    parser.add_argument('--gen_opt', default='adam', choices=['adam', 'rmsprop'], type=str)
-    parser.add_argument('--gen_lr', default=1e-4, type=float)
-    parser.add_argument('--gen_l2', default=0., type=float)
-    parser.add_argument('--gen_p_drop', default=0., type=float)
-    parser.add_argument('--inf_opt', default='adam', choices=['adam', 'rmsprop'], type=str)
-    parser.add_argument('--inf_lr', default=1e-4, type=float)
-    parser.add_argument('--inf_l2', default=0., type=float)
-    parser.add_argument('--inf_p_drop', default=0.1, type=float)
-    parser.add_argument('--grad_clip', default=5., type=float)
-    parser.add_argument('--load_ckpt', default=None, type=str)
-    parser.add_argument('--reset_opt', default=False, type=str2bool)
-    parser.add_argument('--exact_marginal', default=False, type=str2bool)
-    parser.add_argument('--use_self_critic', default=False, type=str2bool)
-    parser.add_argument('--use_reward_standardisation', default=False, type=str2bool)
-    parser.add_argument('--tqdm', default=False, type=str2bool)
-    
-    args = parser.parse_args()
-    if args.cfg:
-        with open(args.cfg, 'r') as f:
-            t_args = argparse.Namespace()
-            t_args.__dict__.update(json.load(f))
-            args = parser.parse_args(namespace=t_args)
-
-    return args
-
-
-def get_optimiser(choice, params, lr, weight_decay, momentum=0.0):    
+def get_optimiser(choice: str, params: Iterable[torch.Tensor], lr: float, weight_decay: float, momentum: float = 0.0):    
+    """Return an optimizer for the parameters in the argument"""
     if choice == 'adam':
         opt = torch.optim.Adam(params, lr=lr, weight_decay=weight_decay)
     elif choice == 'rmsprop':
@@ -87,9 +33,26 @@ def get_optimiser(choice, params, lr, weight_decay, momentum=0.0):
     return opt
 
 
-def make_state(args, device: str, ckpt_path=None, load_opt=True):
+def make_state(args: namedtuple, device: str, ckpt_path: str = None, load_opt=True):
     """
-    :param ckpt_path: use None to get an untrained model
+    Parameters:
+
+        args (namedtuple): all hyperparameters
+        device (str): name of the device where to load the model 
+        ckpt_path (str): use None to get an untrained model
+        load_opt (bool): whether to also load the optimizer state
+
+    Return: 
+        State namedtuple with the following attributes
+            vae (VAE): a VAE object
+            p (GenerativeModel): a generative model
+            q (InferenceModel): an inference model
+            p_opt (torch.optim.Adam or similar): optimizer for generative model
+            q_opt (torch.optim.Adam or similar): optimizer for inference model
+            stats_tr (dict of lists): training statistics
+            stats_val (dict of lists): validation statistics
+            args (namedtuple): all hyperparameters
+            
     """
 
     if ckpt_path and not pathlib.Path(ckpt_path).exists():
@@ -152,92 +115,12 @@ def make_state(args, device: str, ckpt_path=None, load_opt=True):
         use_reward_standardisation=args.use_reward_standardisation
     )
 
-
     state = OrderedDict(vae=vae, p=p, q=q, p_opt=p_opt, q_opt=q_opt, stats_tr=stats_tr, stats_val=stats_val, args=args)
     return namedtuple("State", state.keys())(*state.values())
 
 
-
-def default_cfg():
-    cfg = OrderedDict(        
-        # Data        
-        batch_size=200,
-        data_dir='tmp',
-        height=28,
-        width=28, 
-        output_dir='.',
-        wandb=False,
-        wandb_watch=False,
-        tqdm=False,
-        project="neurips21",
-        cfg=None,
-        # CUDA
-        seed=42,
-        device='cuda:0',
-        # Joint distribution    
-        z_dim=32,     
-        prior_z='gaussian 0.0 1.0',
-        y_dim=10,    
-        prior_f='gibbs 0.0',
-        prior_y='dirichlet 1.0',
-        hidden_dec_size=500,
-        # Approximate posteriors
-        posterior_z='gaussian',
-        posterior_f='gibbs -10 10',
-        posterior_y='dirichlet 1e-3 1e3',
-        shared_concentrations=True,
-        share_fy_net=False,
-        mean_field=False,
-        hidden_enc_size=500,    
-        # Training
-        epochs=200,    
-        training_samples=1,
-        # Evaluation
-        num_samples=100,    
-        # Optimisation & regularisation
-        gen_opt="adam",
-        gen_lr=1e-3,
-        gen_l2=0.0,
-        gen_p_drop=0.0,
-        inf_opt="adam",
-        inf_lr=1e-3,  
-        inf_l2=0.0,  
-        inf_p_drop=0.0,  # dropout for inference model is not well understood    
-        grad_clip=5.0,
-        load_ckpt=None,
-        reset_opt=False,
-        # Variance reduction
-        exact_marginal=False,
-        use_self_critic=False,
-        use_reward_standardisation=True,
-    )
-    return cfg
-
-
-def load_cfg(path, **kwargs):
-    with open(path) as f:
-        cfg = json.load(open(path), object_hook=OrderedDict)
-    known = default_cfg()
-    for k, v in known.items():
-        if k not in cfg:
-            cfg[k] = v
-            print(f"Setting {k} to default {v}", file=sys.stdout)
-    for k, v in cfg.items():
-        if k not in known:
-            raise ValueError(f'Unknown cfg: {k}')
-    for k, v in kwargs.items():
-        if k in known:
-            cfg[k] = v
-            print(f"Overriding {k} to user choice {v}", file=sys.stdout)
-        else:
-            raise ValueError(f"Unknown hparam {k}")
-    return cfg
-
-def make_args(cfg: dict):
-    return namedtuple("Config", cfg.keys())(*cfg.values())
-
-
 def get_batcher(data_loader, args, binarize=True, num_classes=10, onehot=True):
+    """Return """
     batcher = Batcher(
         data_loader, 
         height=args.height, 
@@ -295,18 +178,14 @@ def save_state(state, path):
         'stats_val': state.stats_val,
     }, path)
 
-def main(args):
+def main(args: namedtuple):
     
-    #if cfg.get('wandb', False):
-    #    wandb.init(project='neurips21', config=cfg)
-    #    cfg['output_dir'] = f"{cfg['output_dir']}/{wandb.run.name}"
-    #    print(f"Output directory: {cfg['output_dir']}", file=sys.stdout)
-    #args = namedtuple('Config', cfg.keys())(*cfg.values())
+    # Convert to dict (needed for wandb)
     cfg = vars(args)
     
     with wandb.init(config=cfg, project=args.project):
         args = wandb.config
-        # Config
+        # Make the wandb name part of the output directory
         cfg['output_dir'] = f"{cfg['output_dir']}/{wandb.run.name}"
         args.update({'output_dir': cfg['output_dir']}, allow_val_change=True)
         output_dir = pathlib.Path(args.output_dir)
@@ -321,13 +200,12 @@ def main(args):
         torch.manual_seed(args.seed)
         random.seed(args.seed)
         np.random.seed(args.seed)    
-
         
         # Preparing data
         print("# Preparing MNIST (may take some time the first time)", file=sys.stdout)
         train_loader, valid_loader, test_loader = load_mnist(
             args.batch_size, 
-            save_to=args.data_dir, 
+            save_to=args.data_dir if args.data_dir else tempfile.mkdtemp(),
             height=args.height, 
             width=args.width
         )
@@ -359,12 +237,12 @@ def main(args):
 
         best_val_nll = np.min(state.stats_val['val_nll']) if state.stats_val['val_nll'] else np.inf
 
-        p_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            state.p_opt, mode='min', factor=0.1, patience=10, threshold=0.1, verbose=True,
-        )
-        q_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            state.q_opt, mode='min', factor=0.1, patience=10, threshold=0.1, verbose=True
-        )
+        #p_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        #    state.p_opt, mode='min', factor=0.1, patience=10, threshold=0.1, verbose=True,
+        #)
+        #q_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        #    state.q_opt, mode='min', factor=0.1, patience=10, threshold=0.1, verbose=True
+        #)
 
         for epoch in range(args.epochs):
 
@@ -432,33 +310,12 @@ def main(args):
             wandb.log({f"val.{k}": v for k, v in val_metrics[2].items()})
             
             save_state(state, output_dir/"ckpt.last")
-            #wandb.save(output_dir/"ckpt.last")
             current_val_nll = state.stats_val['val_nll'][-1]
             if current_val_nll < best_val_nll:
                 print(f"Saving new best model (val_nll): old={best_val_nll} new={current_val_nll}")
                 best_val_nll = current_val_nll 
                 save_state(state, output_dir/"ckpt.best")
-                #wandb.save(output_dir/"ckpt.best")
 
-        
-        #np_stats_tr = {k: np.array(v) for k, v in stats_tr.items()}
-        #np_stats_val = {k: np.array(v) for k, v in stats_val.items()}
-        
-    #     torch.save({
-    #         'epoch': epoch + 1,
-    #         'p_state_dict': p.state_dict(),
-    #         'q_state_dict': p.state_dict(),
-    #         'p_opt_state_dict': p_opt.state_dict(),
-    #         'q_opt_state_dict': p_opt.state_dict(),
-    #         'stats_tr': stats_tr,
-    #         'stats_val': stats_val,
-    #     }, f"{output_dir}/training.ckpt")
-        
-
-        #print(tabulate(
-        #    [(k, np.mean(v[-100:]), np.min(v[-100:])) for k, v in np_stats_val.items()],
-        #    headers=['metric', 'mean', 'min']
-        #))
         
         print("# Final validation run")
         val_nll, val_bpd, val_DR = validate(
@@ -469,15 +326,7 @@ def main(args):
         print(tabulate(rows, headers=['metric', 'mean', 'std']))    
         return rows, ['metric', 'mean', 'std']
         
-    #     print("Final test run")
-    #     test_nll, test_bpd, test_DR = validate(
-    #         vae, get_batcher(test_loader, args), args.num_samples, compute_DR=True)
-    #     rows = [('IS-NLL', test_nll, None), ('IS-BPD', test_bpd, None)]
-    #     for k, v in test_DR.items():
-    #         rows.append((k, v.mean(), v.std()))
-    #     print(tabulate(rows, headers=['metric', 'mean', 'std']))    
 
 if __name__ == '__main__':
-    #main(load_cfg(sys.argv[1]))
-    main(get_args())
+    main(hparams.parse_args())
             
