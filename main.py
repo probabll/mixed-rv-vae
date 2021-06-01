@@ -19,6 +19,7 @@ from components import GenerativeModel, InferenceModel, VAE
 from data import load_mnist
 from data import Batcher
 import hparams
+from scheduler import get_constant_schedule_with_warmup
 from typing import Iterable
 
 
@@ -243,12 +244,11 @@ def main(args: namedtuple):
 
         best_val_nll = np.min(state.stats_val['val_nll']) if state.stats_val['val_nll'] else np.inf
 
-        #p_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        #    state.p_opt, mode='min', factor=0.1, patience=10, threshold=0.1, verbose=True,
-        #)
-        #q_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        #    state.q_opt, mode='min', factor=0.1, patience=10, threshold=0.1, verbose=True
-        #)
+        if args.lr_warmup > 0:
+            p_scheduler = get_constant_schedule_with_warmup(state.p_opt, num_warmup_steps=args.lr_warmup)
+            q_scheduler = get_constant_schedule_with_warmup(state.q_opt, num_warmup_steps=args.lr_warmup)
+        else:
+            p_scheduler, q_scheduler = None, None
 
         print("# Training", file=sys.stdout)
         for epoch in range(args.epochs):
@@ -288,6 +288,11 @@ def main(args: namedtuple):
                 )        
                 state.p_opt.step()
                 state.q_opt.step()
+               
+                if p_scheduler:
+                    p_scheduler.step()
+                if q_scheduler:
+                    q_scheduler.step()
 
                 if args.tqdm:
                     iterator.set_description(f'Epoch {epoch+1:3d}/{args.epochs}')
@@ -300,12 +305,9 @@ def main(args: namedtuple):
                     if images:
                         wandb.log({f"training.{k}": wandb.Image(v) for k, v in images.items()})
 
-
             val_metrics = validate(state.vae, get_batcher(valid_loader, args), args.num_samples, 
                     compute_DR=True, exact_KL_Y=args.exact_KL_Y, progressbar=args.tqdm)
     
-            #p_scheduler.step(val_metrics[0])
-            #q_scheduler.step(val_metrics[0])
 
             state.stats_val['val_nll'].append(val_metrics[0].item())
             state.stats_val['val_bpd'].append(val_metrics[1].item())

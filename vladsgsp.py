@@ -169,7 +169,8 @@ class GaussianSparsemax(td.Distribution):
 
         # monte carlo sample (possible optimisation: share noise across instances in batch, it should be safe from an MC point of view)
         # [B, S]
-        t0 = torch.randn(tuple(1 for _ in loc.shape[:-1]) + (n_samples,), dtype=y.dtype, device=y.device)
+        #t0 = torch.randn(tuple(1 for _ in loc.shape[:-1]) + (n_samples,), dtype=y.dtype, device=y.device)
+        t0 = torch.randn(loc.shape[:-1] + (n_samples,), dtype=y.dtype, device=y.device)
 
         # [B]
         adj_loc = (-inv_sum_inv_vars * zsc_nz) 
@@ -317,6 +318,10 @@ def _kl_gaussiansparsemax_gaussiansparsemaxprior(p, q):
     # [S, ...]
     x = p.rsample((p._KL_samples,))
     return (p.log_prob(x) - q.log_prob(x)).mean(dim=0)
+    #kl = 0
+    #for i in range(p._KL_samples):
+    #    kl += p.log_prob(x[i]) - q.log_prob(x[i])
+    #return kl
 
 
 def test_dtypes():

@@ -40,6 +40,8 @@ def arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--epochs', default=200, type=int)
     parser.add_argument('--training_samples', default=1, type=int)
     parser.add_argument('--num_samples', default=100, type=int)
+    parser.add_argument('--lr_warmup', default=0, type=int, 
+            help="Set to more than 0 to get a linear warmup from 0 to gen_lr (or inf_lr)")
     parser.add_argument('--gen_opt', default='adam', choices=['adam', 'rmsprop'], type=str)
     parser.add_argument('--gen_lr', default=1e-4, type=float)
     parser.add_argument('--gen_l2', default=0., type=float)
