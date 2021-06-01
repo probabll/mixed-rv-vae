@@ -68,38 +68,38 @@ def _scipy_log_prob(y, loc, scale, pivot_alg='first', tiny=1e-12, huge=1e12):
     # Joint log prob for the zeros (needs the cdf)
     # [B]
     constant_term = 1. / torch.where(face, 1./var, torch.zeros_like(var)).sum(-1)
-    # Again, we aim to reason with lower-dimensional mvns via
-    # the td.MultivariateNormal interface. For that, I will mask the coordinates in face.
-    # The non-zeros get a tiny variance
-    # [B, K, K]
-    diag_corrected = torch.diag_embed(torch.where(face, torch.zeros_like(var) + tiny, var))
-    # [B, 1, 1]
-    offset_corrected = constant_term.unsqueeze(-1).unsqueeze(-1)
-    # These are the zeros only.
-    # [B, K, K]
-    cov_corrected_mask = torch.logical_not(face).unsqueeze(-1) * torch.logical_not(face.unsqueeze(-2))
-    cov_corrected = torch.where(cov_corrected_mask, diag_corrected + offset_corrected, diag_corrected)
 
-    # The non-zeros get a large negative mean.
-    # [B]
-    mean_constant_term = constant_term * torch.where(face, (y - loc)/var, torch.zeros_like(y)).sum(-1)
-    # [B, K]
-    #  see that for non-zeros I move the location to something extremely negative
-    #  in combination with tiny variace this makes the density of 0 evaluate to 0
-    #  and the cdf of 0 evaluate to 1, for those coordinates
-    mean_corrected = torch.where(face, torch.zeros_like(y) - huge, loc + mean_constant_term.unsqueeze(-1))
-
-    # [B]
-
-    # invoke scipy here
     B = y.shape[0]
     log_cdf = y.new_zeros(B)
 
+    zsc = (y - loc) / var
+
+
     for i in range(B):
-        mvn = multivariate_normal(mean=mean_corrected[i].numpy(),
-                                  cov=cov_corrected[i].numpy(),
-                                  allow_singular=True)
-        log_cdf[i] = mvn.logcdf(torch.zeros_like(y[i]).numpy())
+        if (~face[i]).sum() == 0:
+            continue
+
+        # The non-zeros get a tiny variance
+        # [K, K]
+        diag_ = torch.diag(var[0][~face[i]])
+        # [1]
+        offset_ = constant_term[i]  # .unsqueeze(-1).unsqueeze(-1)
+        cov_ = diag_ + offset_
+
+        # [B]
+        mean_constant_term = constant_term[i] * zsc[i][face[i]].sum()
+        mean_ = loc[0][~face[i]] + mean_constant_term
+
+        # [B]
+
+        # invoke scipy here
+        log_cdf[i] = multivariate_normal.logcdf(torch.zeros_like(mean_).numpy(),
+                                                mean=mean_.numpy(),
+                                                cov=cov_.numpy(),
+                                                allow_singular=True,
+                                                maxpts=100000000,
+                                                abseps=1e-12,
+                                                releps=1e-12)
 
     # [B]
     log_det = face.float().sum(-1).log()
@@ -131,14 +131,21 @@ def main():
     gs = gs.expand((5,))
     Y = gs.sample()
     print(Y)
-    print("Closed-form log_prob (1-D MC 100 samples)")
-    print(gs.log_prob(Y, n_samples=100))
-
-    print("Closed-form log_prob (1-D MC 1000000 samples)")
-    print(gs.log_prob(Y, n_samples=1000000))
 
     print("scipy")
     print(_scipy_log_prob(Y, mu, std))
+
+    print("our log_prob (1-D MC 1000 samples)")
+    print(gs.log_prob(Y, n_samples=1000))
+
+    lp = torch.zeros(5)
+    print("our log_prob (1-D MC very many samples)")
+
+    N = 1000
+    for _ in range(N):
+        lp += gs.log_prob(Y, n_samples=1000)
+
+    print(lp / N)
 
 
 
