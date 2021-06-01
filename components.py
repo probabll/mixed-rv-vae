@@ -5,14 +5,14 @@ import torch.distributions as td
 import probabll.distributions as pd
 import torch.nn as nn
 from collections import OrderedDict, deque
-#from gaussiansp import GaussianSparsemax, GaussianSparsemaxPrior
-from vladsgsp import GaussianSparsemax, GaussianSparsemaxPrior
+from gaussiansp import GaussianSparsemax, GaussianSparsemaxPrior
 
 
 @td.register_kl(td.RelaxedOneHotCategorical, td.Dirichlet)
 def _kl_concrete_dirichlet(p, q):
     z = p.rsample()
     return p.log_prob(z) - q.log_prob(z)
+
 
 @td.register_kl(td.RelaxedOneHotCategorical, td.RelaxedOneHotCategorical)
 def _kl_concrete_concrete(p, q):
@@ -21,7 +21,7 @@ def _kl_concrete_concrete(p, q):
 
 
 def assert_shape(t, shape, message):
-    assert t.shape == shape, f"{message} has the wrong shape: got {t.shape}, expected {shape}"        
+    assert t.shape == shape, f"{message} has the wrong shape: got {t.shape}, expected {shape}"
 
 
 def parse_prior_name(string):
@@ -58,11 +58,11 @@ def parse_posterior_name(string):
 
 class GenerativeModel(nn.Module):
     """
-    A joint distribution over         
-        
+    A joint distribution over
+
         Y \in \Delta_{K-1}
             a sparse probability vector
-        Z \in R^H         
+        Z \in R^H
             a latent embedding
         X in {0,1}^D
             an MNIST digit
@@ -75,15 +75,15 @@ class GenerativeModel(nn.Module):
             p(Y=y) = \sum_f p(F=f)p(Y=y|F=f)
     """
 
-    def __init__(self, y_dim, z_dim, data_dim, hidden_dec_size, 
-                 p_drop=0.0, 
+    def __init__(self, y_dim, z_dim, data_dim, hidden_dec_size,
+                 p_drop=0.0,
                  prior_f='gibbs 0.0',
                  prior_y='dirichlet 1.0',
                  prior_z='gaussian 0.0 1.0'
             ):
-        """        
+        """
 
-        Parameters: 
+        Parameters:
             y_dim: dimensionality (K) of the mixed rv
             z_dim: dimensionality (H) of the Gaussian rv (use 0 to disable it)
             data_dim: dimensionality (D) of the observation
@@ -106,11 +106,11 @@ class GenerativeModel(nn.Module):
         super().__init__()
         self._y_dim = y_dim
         self._z_dim = z_dim
-        self._data_dim = data_dim   
+        self._data_dim = data_dim
         self._f_dist, self._f_params = parse_prior_name(prior_f)
         self._y_dist, self._y_params = parse_prior_name(prior_y)
         self._z_dist, self._z_params = parse_prior_name(prior_z)
-        
+
         assert z_dim + y_dim > 0
         assert self._z_dist in ['gaussian', 'dirichlet', 'concrete', 'onehotcat', 'gaussian-sparsemax-max-ent'], f"Unknown choice of distribution for Z: {self._z_dist}"
         assert self._f_dist in ['gibbs', 'gibbs-max-ent', 'categorical'], f"Unknown choice of distribution for F: {self._f_dist}"
@@ -167,22 +167,22 @@ class GenerativeModel(nn.Module):
     @property
     def data_dim(self):
         return self._data_dim
-    
+
     @property
     def latent_dim(self):
         return self._z_dim + self._y_dim
-    
+
     @property
     def z_dim(self):
         return self._z_dim
-    
+
     @property
     def y_dim(self):
         return self._y_dim
-    
+
     def Z(self):
         """Return a Normal distribution over latent space"""
-        if self._z_dim:            
+        if self._z_dim:
             if self._z_dist == 'gaussian':
                 Z = td.Independent(
                         td.Normal(loc=self._prior_z_location, scale=self._prior_z_scale),
@@ -238,13 +238,13 @@ class GenerativeModel(nn.Module):
     def X(self, y, z):
         """Return a product of D Bernoulli distributions"""
         if z.shape[:-1] != y.shape[:-1]:
-            raise ValueError("z and y must have the same batch_shape")        
+            raise ValueError("z and y must have the same batch_shape")
         inputs = torch.cat([y, z], -1)
         logits = self._decoder(inputs)
         return td.Independent(td.Bernoulli(logits=logits), 1)
-    
+
     def sample(self, sample_shape=torch.Size([])):
-        """Return (f, y, z, x)"""        
+        """Return (f, y, z, x)"""
         # [sample_shape, K]
         f = self.F().sample(sample_shape)
         # [sample_shape, K]
@@ -254,7 +254,7 @@ class GenerativeModel(nn.Module):
         # [sample_shape, D]
         x = self.X(z=z, y=y).sample()
         return f, y, z, x
-    
+
     def log_prob(self, f, y, z, x, per_bit=False, reduce=True):
         """
         Return the log probability of each one of the variables in order
@@ -269,34 +269,34 @@ class GenerativeModel(nn.Module):
             if per_bit:
                 return self.F().log_prob(f).unsqueeze(-1) + self.Y(f).log_prob(y).unsqueeze(-1) + self.Z().log_prob(z).unsqueeze(-1) + self.X(z=z, y=y).base_dist.log_prob(x)
             else:
-                return self.F().log_prob(f) + self.Y(f).log_prob(y) + self.Z().log_prob(z) + self.X(z=z, y=y).log_prob(x) 
-        
-        
+                return self.F().log_prob(f) + self.Y(f).log_prob(y) + self.Z().log_prob(z) + self.X(z=z, y=y).log_prob(x)
+
+
 class InferenceModel(nn.Module):
     """
-    A joint distribution over         
-        
+    A joint distribution over
+
         Y \in \Delta_{K-1}
             a sparse probability vector
-        Z \in R^H         
+        Z \in R^H
             a latent embedding
-            
-            
+
+
     q(Y=y,Z=z|X=x) = q(Y=y|X=x)q(Z=z|Y=y, X=x)
-    and 
+    and
     q(Y=y|X=x) = \sum_f q(F=f|X=x)q(Y=y|F=f,X=x)
-    
+
     Optionally we make a mean field assumption, then q(Z=z|Y=y, X=x)=q(Z=z|X=x),
     and optionally we predict a shared set of concentrations for all faces given x.
 
     """
 
-    def __init__(self, y_dim, z_dim, data_dim, hidden_enc_size, 
-                 p_drop=0.0, 
-                 posterior_z='gaussian', 
+    def __init__(self, y_dim, z_dim, data_dim, hidden_enc_size,
+                 p_drop=0.0,
+                 posterior_z='gaussian',
                  posterior_f='gibbs -10 10',
                  posterior_y='dirichlet 1e-3 1e3',
-                 mean_field=True, 
+                 mean_field=True,
                  shared_enc_fy=True,
                  gsp_cdf_samples=None,
                  gsp_KL_samples=None,
@@ -321,7 +321,7 @@ class InferenceModel(nn.Module):
                 dirichlet (lower-concentration upper-concentration)
                 identity
             mean_field (bool): whether to model q(y|x)q(z|x) versus q(y|x)q(z|x,y)
-            shared_enc_fy (bool): 
+            shared_enc_fy (bool):
         """
         assert z_dim + y_dim > 0
         assert parse_posterior_name(posterior_z)[0] in ['gaussian', 'dirichlet', 'concrete', 'onehotcat', 'gaussian-sparsemax'], "Unknown choice of distribution for Z|x"
@@ -329,10 +329,10 @@ class InferenceModel(nn.Module):
         assert parse_posterior_name(posterior_y)[0] in ['dirichlet', 'identity'], "Unknown choice of distribution for Y|f,x"
 
         super().__init__()
-                
+
         self._y_dim = y_dim
         self._z_dim = z_dim
-        
+
         self._f_dist, self._f_params = parse_posterior_name(posterior_f)
         self._y_dist, self._y_params = parse_posterior_name(posterior_y)
         self._z_dist, self._z_params = parse_posterior_name(posterior_z)
@@ -342,7 +342,7 @@ class InferenceModel(nn.Module):
 
         self._mean_field = mean_field
         self._shared_enc_fy = shared_enc_fy
-        
+
         # Y|X=x
         if y_dim:
             if shared_enc_fy:
@@ -382,7 +382,7 @@ class InferenceModel(nn.Module):
             )
 
         # Z|X=x, Y=y
-        if z_dim: 
+        if z_dim:
             z_num_params = 2 * z_dim if self._z_dist in ['gaussian', 'gaussian-sparsemax'] else z_dim
             self._zparams_net = nn.Sequential(
                 nn.Dropout(p_drop),
@@ -393,29 +393,29 @@ class InferenceModel(nn.Module):
                 nn.ReLU(),
                 nn.Linear(hidden_enc_size, z_num_params)
             )
-        
-    
+
+
     @property
     def mean_field(self):
         return self._mean_field
-    
+
     def _match_sample_shape(self, x, y):
         if len(x.shape) == len(y.shape):
-            return x, y        
+            return x, y
         if len(y.shape) > len(x.shape):
             sample_dims = len(y.shape) - len(x.shape)
-            sample_shape = y.shape[:sample_dims] 
+            sample_shape = y.shape[:sample_dims]
             x = x.view((1,) * sample_dims + x.shape).expand(sample_shape + (-1,) * len(x.shape))
         else:
             y, x  = self._match_sample_shape(y, x)
         return x, y
-            
-    def Z(self, x, y):  
+
+    def Z(self, x, y):
         x, y = self._match_sample_shape(x, y)
         if self._z_dim:
             inputs = x if self._mean_field else torch.cat([y, x], -1)
             params = self._zparams_net(inputs)
-            if self._z_dist == 'gaussian':                
+            if self._z_dist == 'gaussian':
                 loc, scale = params[..., :self._z_dim], nn.functional.softplus(params[..., self._z_dim:])
                 if len(self._z_params) >= 2:  # we are clamping scales
                     scale = torch.clamp(scales, self._z_params[0], self._z_params[1])
@@ -469,7 +469,7 @@ class InferenceModel(nn.Module):
             elif self._f_dist == 'categorical':
                 F = td.OneHotCategorical(logits=scores)
         return F
-    
+
     def Y(self, x, f, state=dict()):
         x, f = self._match_sample_shape(x, f)
         if not self._y_dim:
@@ -483,13 +483,13 @@ class InferenceModel(nn.Module):
                     h, f = self._match_sample_shape(h, f)
                 else:
                     h = self._enc_for_y(torch.cat([f, x], -1))
-                concentrations = self._y_concentrations(h) 
+                concentrations = self._y_concentrations(h)
                 if len(self._y_params) == 2:  # we are clamping concentrations
                     concentrations = torch.clamp(concentrations, self._y_params[0], self._y_params[1])
                 Y = pd.MaskedDirichlet(f.bool(), concentrations)
         return Y
 
-            
+
     def _F(self, x, predictors=None):
         if not self._y_dim:
             return td.Independent(pd.Delta(torch.zeros(x.shape[:-1] + (0,), device=x.device)), 1)
@@ -497,7 +497,7 @@ class InferenceModel(nn.Module):
         if self._shared_concentrations and self._share_fy_net:
             scores = self._scores_and_concs_net(x)[...,:self._y_dim]
         else:
-            scores = self._scores_net(x) 
+            scores = self._scores_net(x)
         if len(self._f_params) == 2: # we are clamping scores
             scores = torch.clamp(scores, self._f_params[0], self._f_params[1])
             #scores = torch.tanh(scores) * 10
@@ -512,17 +512,17 @@ class InferenceModel(nn.Module):
             return td.Independent(pd.Delta(torch.zeros_like(f)), 1)
         if self._y_dist == 'identity':
             return td.Independent(pd.Delta(f), 1)
-            
+
         if self._shared_concentrations:
             inputs = x  # [...,D]
             if self._share_fy_net:
                 concentration = self._scores_and_concs_net(x)[...,self._y_dim:]
             else:
-                concentration = self._concentrations_net(inputs) 
+                concentration = self._concentrations_net(inputs)
         else:
             inputs = torch.cat([f, x], -1)  # [...,K+D]
             # [...,K]
-            concentration = self._concentrations_net(inputs) 
+            concentration = self._concentrations_net(inputs)
         if len(self._y_params) == 2:  # we are clamping concentrations
             concentration = torch.clamp(concentration, self._y_params[0], self._y_params[1])
             #concentration = torch.sigmoid(concentration) * 100.0
@@ -531,9 +531,9 @@ class InferenceModel(nn.Module):
 
     def sample(self, x, sample_shape=torch.Size([])):
         """Return (f, y, z), No gradients through this."""
-        with torch.no_grad():     
+        with torch.no_grad():
             # [sample_shape, B, D]
-            x = x.expand(sample_shape + x.shape) 
+            x = x.expand(sample_shape + x.shape)
             state = dict()
             # [sample_shape, B, K]
             f = self.F(x, state=state).sample()
@@ -542,7 +542,7 @@ class InferenceModel(nn.Module):
             # [sample_shape, B, H]
             z = self.Z(x=x, y=y).sample()
             return f, y, z
-    
+
     def log_prob(self, x, f, y, z, reduce=True):
         """log q(f|x), log q(y|f, x), log q(z|y, x)"""
         state = dict()
@@ -553,15 +553,15 @@ class InferenceModel(nn.Module):
             return log_prob_f + log_prob_y + log_prob_z
         else:
             return log_prob_f, log_prob_y, log_prob_z
-    
+
 
 class VAE:
     """
     Helper class to compute quantities related to VI.
     """
 
-    def __init__(self, p: GenerativeModel, q: InferenceModel, 
-                 use_self_critic=False, use_reward_standardisation=True):        
+    def __init__(self, p: GenerativeModel, q: InferenceModel,
+                 use_self_critic=False, use_reward_standardisation=True):
         self.p = p
         self.q = q
         self.use_self_critic = use_self_critic
@@ -580,12 +580,12 @@ class VAE:
         return self.p.parameters()
 
     def inf_parameters(self):
-        return self.q.parameters()   
-    
+        return self.q.parameters()
+
     def critic(self, x_obs, z, q_F, state, exact_KL_Y=False):
         """This estimates reward (w.r.t sampling of F) on a single sample for variance reduction"""
         S, B, H, K, D = x_obs.shape[0], x_obs.shape[1], self.p.z_dim, self.p.y_dim, self.p.data_dim
-        with torch.no_grad():            
+        with torch.no_grad():
             # Approximate posteriors and samples
             # [S, B, K]
             f = q_F.sample((S,))  # we resample f
@@ -594,7 +594,7 @@ class VAE:
             #if q_Y.batch_shape != (S, B):
             #    q_Y = q_Y.expand((S, B))
             # [S, B, K]
-            y = q_Y.sample() 
+            y = q_Y.sample()
             assert_shape(y, (S, B, K), "y ~ Y|X=x, F=f, \lambda")
             if not self.q.mean_field:
                 q_Z = self.q.Z(x=x_obs, y=y)
@@ -605,13 +605,13 @@ class VAE:
                 assert_shape(z, (S, B, H), "z ~ Z|X=x, Y=y, \lambda")
             else:
                 q_Z = None
-            
+
             # Priors
             p_F = self.p.F()
             if p_F.batch_shape != (S,B):
                 p_F = p_F.expand((S,B))
 
-            p_Y = self.p.Y(f)  # we condition on f ~ q_F                     
+            p_Y = self.p.Y(f)  # we condition on f ~ q_F
             if p_Y.batch_shape != (S,B):
                 p_Y = p_Y.expand((S,B))
 
@@ -627,7 +627,7 @@ class VAE:
                 critic = ll
             else:
                 critic = ll - kl_Y_f
-            
+
             if not self.q.mean_field:
                 p_Z = self.p.Z()
                 if p_Z.batch_shape != (S, B):
@@ -636,9 +636,9 @@ class VAE:
                 kl_Z = td.kl_divergence(q_Z, p_Z)
                 # [S, B]
                 critic -= kl_Z
-            
+
             return critic
-        
+
     def update_reward_stats(self, reward, dim=0):
         """Return the current statistics and update the vector"""
         if len(self._rewards) > 1:
@@ -651,10 +651,10 @@ class VAE:
             self._rewards.popleft()
         self._rewards.append(reward.mean(dim).item())
         return avg, std
-    
+
     def DR(self, x_obs, exact_KL_Y=False):
         with torch.no_grad():
-            B, H, K, D = x_obs.shape[0], self.p.z_dim, self.p.y_dim, self.p.data_dim            
+            B, H, K, D = x_obs.shape[0], self.p.z_dim, self.p.y_dim, self.p.data_dim
 
             fy_state = dict()
             # Posterior approximations and samples
@@ -666,23 +666,23 @@ class VAE:
             q_Y = self.q.Y(x=x_obs, f=f, state=fy_state)
             y = q_Y.rsample()
             assert_shape(y, (B, K), "y ~ Y|X=x, F=f, \lambda")
-            
+
             q_Z = self.q.Z(x=x_obs, y=y)
             # [B, H]
             z = q_Z.rsample()
             assert_shape(z, (B, H), "z ~ Z|X=x, Y=y, \lambda")
-            
-            # Priors            
+
+            # Priors
             p_F = self.p.F()
             if p_F.batch_shape != x_obs.shape[:1]:
                 p_F = p_F.expand(x_obs.shape[:1] + p_F.batch_shape)
 
             p_Y = self.p.Y(f)  # we condition on f ~ q_F thus batch_shape is already correct
-            
+
             p_Z = self.p.Z()
             if p_Z.batch_shape != x_obs.shape[:1]:
                 p_Z = p_Z.expand(x_obs.shape[:1] + p_Z.batch_shape)
-                
+
             # Sampling distribution
             p_X = self.p.X(y=y, z=z)  # we condition on y ~ q_Y
 
@@ -694,9 +694,9 @@ class VAE:
             )
 
             # ELBO: the first term is an MC estimate (we sampled (f,y))
-            # the second term is exact 
+            # the second term is exact
             # the third tuse_self_criticis an MC estimate (we sampled f)
-            D = -p_X.log_prob(x_obs)            
+            D = -p_X.log_prob(x_obs)
             kl_Y_f = td.kl_divergence(q_Y, p_Y)
             kl_F = td.kl_divergence(q_F, p_F)
             kl_Z = td.kl_divergence(q_Z, p_Z)
@@ -708,7 +708,7 @@ class VAE:
                 kl_Y = self.KL_Y_Dir1(q_F, q_Y._concentration)
             else:
                 kl_Y = torch.zeros_like(kl_F)
-            
+
             if exact_KL_Y:
                 ret['ELBO'] = -D - (kl_F + kl_Y + kl_Z)
                 ret['D'] = D
@@ -727,31 +727,31 @@ class VAE:
         return ret
 
     def KL_Y_Dir1(self, q_F, alphas):
-        # [S, B, K] 
+        # [S, B, K]
         all_f = q_F.enumerate_support()
         assert alphas.shape == all_f.shape[1:], f"I need shape: {all_f.shape[1:]}"
         all_q_f = q_F.log_prob(all_f).exp()
-        all_q_y = pd.MaskedDirichlet(all_f.bool(), alphas.expand(all_f.shape[:1] + alphas.shape)) 
-        all_p_y = pd.MaskedDirichlet(all_f.bool(), torch.ones_like(all_f)) 
+        all_q_y = pd.MaskedDirichlet(all_f.bool(), alphas.expand(all_f.shape[:1] + alphas.shape))
+        all_p_y = pd.MaskedDirichlet(all_f.bool(), torch.ones_like(all_f))
         # [S, B]
         all_KL_Y = all_q_f * ( - all_q_y.entropy() - all_p_y.log_prob(all_p_y.sample()))  # TODO: this works because the prior Dirichlet is Dir(1.0)
         # [B]
         all_KL_Y = all_KL_Y.sum(0)
         return all_KL_Y
-    
+
     def loss(self, x_obs, c_obs=None, num_samples=1, samples=None, images=None, exact_marginal=False, exact_KL_Y=False):
         """
         :param x_obs: [B, D]
         """
         if num_samples < 1:
             raise ValueError("I cannot compute an estimate without sampling")
-        
+
         S, B, H, K, D = num_samples, x_obs.shape[0], self.p.z_dim, self.p.y_dim, self.p.data_dim  # S > 1
 
         # Approximate posteriors and samples
         fy_state = dict()
         q_F = self.q.F(x_obs, state=fy_state)
-        
+
         if exact_marginal:
             # [S, B, K]
             f = q_F.enumerate_support()
@@ -761,34 +761,34 @@ class VAE:
             f = q_F.sample((S,)) # not rsample
 
         assert_shape(f, (S, B, K), "f ~ F|X=x, \lambda")
-        
+
         # [S, B, D]
         x_obs = x_obs.expand((S, B, D))
-        
+
         q_Y = self.q.Y(x=x_obs, f=f, state=fy_state)
         # [S, B, K]
         y = q_Y.rsample()  # with reparameterisation! (important)
         assert_shape(y, (S, B, K), "y ~ Y|F=f, \lambda")
-        
+
         q_Z = self.q.Z(x=x_obs, y=y)
         # [S, B, H]
         z = q_Z.rsample()  # with reparameterisation
         assert_shape(z, (S, B, H), "z ~ Z|X=x, \lambda")
-        
+
         # Priors
         p_F = self.p.F()
         if p_F.batch_shape != (B,):
             p_F = p_F.expand((B,))
-        
+
         p_Y = self.p.Y(f)  # we condition on f ~ q_F  thus batch_shape is already correct
-        
+
         p_Z = self.p.Z()
         if p_Z.batch_shape != (S,B):
             p_Z = p_Z.expand((S,B))
-            
+
         # Sampling distribution
         p_X = self.p.X(y=y, z=z)  # we condition on y ~ q_Y
-        
+
         # Return type
         ret = OrderedDict(
             loss=0.,
@@ -796,18 +796,18 @@ class VAE:
 
         # E_F E_Y E_Z [log p(x|y)] - KL_F - E_F[KL_Y] - KL_Z
         # sum_f q(f) E_Y E_Z [log p(x|y)] - KL_F - \sum_f KL_Y - KL_Z
-        # sum_f q(f) log p(x|y) 
+        # sum_f q(f) log p(x|y)
         # - KL_F
         # - sum_f q(f) KL(Y|f,x || Y|f)
         # - KL_Z
 
         # ELBO: the first term is an MC estimate (we sampled (f,y))
-        # the second term is exact 
+        # the second term is exact
         # the third tuse_self_criticis an MC estimate (we sampled f)
         # [S, B]
-        ll = p_X.log_prob(x_obs)        
+        ll = p_X.log_prob(x_obs)
         kl_Y_f = td.kl_divergence(q_Y, p_Y)
-        
+
         # [1, B]
         kl_F = td.kl_divergence(q_F, p_F).unsqueeze(0)
         # [S, B]
@@ -819,7 +819,7 @@ class VAE:
             # [1, B]
             ll = (prob_f * ll).sum(0, keepdims=True)
             kl_Y = (prob_f * kl_Y).sum(0, keepdims=True)
-        elif exact_KL_Y:  # TODO: this can be optimised 
+        elif exact_KL_Y:  # TODO: this can be optimised
             if type(q_Y) is not pd.MaskedDirichlet:
                 raise ValueError("I can only compute exact KL Y if you use MaskedDirichlet posteriors")
             # [1, B]
@@ -827,16 +827,16 @@ class VAE:
         else:
             # [1, B]
             kl_Y = torch.zeros_like(kl_F)
-        
+
         # Logging ELBO terms
         # []
         reduce_dims = (0,1)
-        ret['D'] = -ll.mean((0,1)).item()        
+        ret['D'] = -ll.mean((0,1)).item()
         if exact_marginal or exact_KL_Y:
-            ret['R'] = (kl_F + kl_Y + kl_Z).mean((0,1)).item()        
+            ret['R'] = (kl_F + kl_Y + kl_Z).mean((0,1)).item()
             ret['ELBO'] = (ll - kl_Y - kl_Z - kl_F).mean((0,1)).item()
         else:
-            ret['R'] = (kl_F + kl_Y_f + kl_Z).mean((0,1)).item()        
+            ret['R'] = (kl_F + kl_Y_f + kl_Z).mean((0,1)).item()
             ret['ELBO'] = (ll - kl_Y_f - kl_Z - kl_F).mean((0,1)).item()
         if self.p.y_dim:
             ret['R_F'] = kl_F.mean((0,1)).item()
@@ -844,10 +844,10 @@ class VAE:
             if exact_marginal or exact_KL_Y:
                 ret['R_Y'] = kl_Y.mean((0,1)).item()
         if self.p.z_dim:
-            ret['R_Z'] = kl_Z.mean((0,1)).item()        
+            ret['R_Z'] = kl_Z.mean((0,1)).item()
 
         # Gradient surrogates and loss
-        
+
         # i) reparameterised gradient (g_rep)
         # [S,B]
         if exact_marginal or exact_KL_Y:
@@ -860,7 +860,7 @@ class VAE:
             # E_ZFY[ log p(x|z,f,y)] - -KL(Z) - KL(F) - E_F[ KL(Y) ]
             # E_F[ E_Y[ E_Z[ log p(x|z,f,y) ] - KL(Y) ] ] -KL(Z) - KL(F)
             # E_F[ r(F) ] for r(f) = log p(x|z,f,y)
-            # r(f).detach() * log q(f)  
+            # r(f).detach() * log q(f)
             # [S, B]
             if exact_KL_Y:
                 reward = ll.detach() if self.q.mean_field else (ll - kl_Z).detach()
@@ -874,7 +874,7 @@ class VAE:
                     critic = sum_others / (num_samples - 1)
                     # [S, B]
                     critic = (sum_others + critic) / num_samples
-                    criticised_reward = reward - critic.detach() 
+                    criticised_reward = reward - critic.detach()
                 else:
                     # [S, B]
                     criticised_reward = reward - self.critic(x_obs, z=z, q_F=q_F, state=fy_state, exact_KL_Y=exact_KL_Y).detach()
@@ -888,7 +888,7 @@ class VAE:
 
             # [S, B]
             sfe_surrogate = standardised_reward * q_F.log_prob(f)
-            
+
             # Loggin SFE variants
             ret['SFE_reward'] = reward.mean(reduce_dims).item()
             if self.use_self_critic:
@@ -897,11 +897,11 @@ class VAE:
                 ret['SFE_standardised_reward'] = standardised_reward.mean(reduce_dims).item()
         else:
             sfe_surrogate = torch.zeros_like(grep_surrogate)
-        
+
         # []
         loss = -(grep_surrogate + sfe_surrogate).mean((0,1))
         ret['loss'] = loss.item()
-        
+
         if samples is not None:
             if self.p.y_dim:
                 samples['f'] = f.detach().cpu()
@@ -927,77 +927,77 @@ class VAE:
         """
         :param x_obs: [B, D]
         """
-        B, H, K, D = x_obs.shape[0], self.p.z_dim, self.p.y_dim, self.p.data_dim        
-                
+        B, H, K, D = x_obs.shape[0], self.p.z_dim, self.p.y_dim, self.p.data_dim
+
         # Approximate posteriors and samples
         q_F = self.q.F(x_obs)
         # [B, K]
         f = q_F.sample() # not rsample
         assert_shape(f, (B, K), "f ~ F|X=x, \lambda")
-        
+
         q_Y = self.q.Y(x=x_obs, f=f)
         y = q_Y.rsample()  # with reparameterisation! (important)
         assert_shape(y, (B, K), "y ~ Y|F=f, \lambda")
-        
+
         q_Z = self.q.Z(x=x_obs, y=y)
         # [B, H]
         z = q_Z.rsample()  # with reparameterisation
         assert_shape(z, (B, H), "z ~ Z|X=x, \lambda")
-        
+
         # Priors
         p_F = self.p.F()
         if p_F.batch_shape != x_obs.shape[:1]:
             p_F = p_F.expand(x_obs.shape[:1] + p_F.batch_shape)
-        
+
         p_Y = self.p.Y(f)  # we condition on f ~ q_F  thus batch_shape is already correct
-        
+
         p_Z = self.p.Z()
         if p_Z.batch_shape != x_obs.shape[:1]:
             p_Z = p_Z.expand(x_obs.shape[:1] + p_Z.batch_shape)
-            
+
         # Sampling distribution
         p_X = self.p.X(y=y, z=z)  # we condition on y ~ q_Y
-        
+
         # Return type
         ret = OrderedDict(
             loss=0.,
         )
 
         # ELBO: the first term is an MC estimate (we sampled (f,y))
-        # the second term is exact 
+        # the second term is exact
         # the third tuse_self_criticis an MC estimate (we sampled f)
-        ll = p_X.log_prob(x_obs)        
+        ll = p_X.log_prob(x_obs)
         kl_Z = td.kl_divergence(q_Z, p_Z)
         kl_Y = td.kl_divergence(q_Y, p_Y)
         kl_F = td.kl_divergence(q_F, p_F)
-        
+
         # Logging ELBO terms
-        ret['D'] = -ll.mean(0).item()        
-        ret['R'] = (kl_F + kl_Y + kl_Z).mean(0).item()        
+        ret['D'] = -ll.mean(0).item()
+        ret['R'] = (kl_F + kl_Y + kl_Z).mean(0).item()
         ret['ELBO'] = (ll - kl_F - kl_Y - kl_Z).mean(0).item()
         if self.p.y_dim:
             ret['R_F'] = kl_F.mean(0).item()
             ret['R_Y'] = kl_Y.mean(0).item()
         if self.p.z_dim:
-            ret['R_Z'] = kl_Z.mean(0).item()        
-            
+            ret['R_Z'] = kl_Z.mean(0).item()
+
         # Gradient surrogates and loss
-        
+
         # i) reparameterised gradient (g_rep)
-        grep_surrogate = ll - kl_Z - kl_F - kl_Y  
+        grep_surrogate = ll - kl_Z - kl_F - kl_Y
 
         # ii) score function estimator (g_SFE)
-        if self.p.y_dim:            
+        if self.p.y_dim:
             # E_ZFY[ log p(x|z,f,y)] - -KL(Z) - KL(F) - E_F[ KL(Y) ]
             # E_F[ E_Y[ E_Z[ log p(x|z,f,y) ] - KL(Y) ] ] -KL(Z) - KL(F)
             # E_F[ r(F) ] for r(f) = log p(x|z,f,y)
-            # r(f).detach() * log q(f)            
+            # r(f).detach() * log q(f)
             reward = (ll - kl_Y).detach() if self.q.mean_field else (ll - kl_Y - kl_Z).detach()
             # Variance reduction tricks
             if self.use_self_critic:
                 criticised_reward = reward - self.critic(x_obs, z=z, q_F=q_F).detach()
             else:
-                criticised_reward = reward        
+                criticised_reward = reward
             if self.use_reward_standardisation:
                 reward_avg, reward_std = self.update_reward_stats(criticised_reward)
                 standardised_reward = (criticised_reward - reward_avg) / np.minimum(reward_std, 1.0)
@@ -1005,7 +1005,7 @@ class VAE:
                 standardised_reward = criticised_reward
 
             sfe_surrogate = standardised_reward * q_F.log_prob(f)
-            
+
             # Loggin SFE variants
             ret['SFE_reward'] = reward.mean(0).item()
             if self.use_self_critic:
@@ -1014,11 +1014,11 @@ class VAE:
                 ret['SFE_standardised_reward'] = standardised_reward.mean(0).item()
         else:
             sfe_surrogate = torch.zeros_like(grep_surrogate)
-        
+
         # []
         loss = -(grep_surrogate + sfe_surrogate).mean(0)
         ret['loss'] = loss.item()
-        
+
         if samples is not None:
             if self.p.y_dim:
                 samples['f'] = f.detach().cpu()
@@ -1040,7 +1040,7 @@ class VAE:
             #        images['z_given_c'] = ((z.unsqueeze(1) * c_obs.unsqueeze(-1)).sum(0) / c_obs.sum(0).unsqueeze(-1)).detach().cpu()
         return loss, ret
 
-    def estimate_ll(self, x_obs, num_samples):     
+    def estimate_ll(self, x_obs, num_samples):
         with torch.no_grad():
             self.eval()
             # log 1/N \sum_{n} p(x, z_n)/q(z_n|x)
@@ -1049,23 +1049,23 @@ class VAE:
             # Here I compute: log p(f) + log p(y|f) + log p(z) + log p(x|y,z)
             # [N, B]
             log_p = self.p.log_prob(f=f, y=y, z=z, x=x_obs)
-            # Here I compute: log q(f|x) + log q(y|x,f) + log q(z|x,y) 
+            # Here I compute: log q(f|x) + log q(y|x,f) + log q(z|x,y)
             # [N, B]
             log_q = self.q.log_prob(x=x_obs, f=f, y=y, z=z)
             # [B]
-            ll = torch.logsumexp(log_p - log_q, 0) - np.log(num_samples)                    
+            ll = torch.logsumexp(log_p - log_q, 0) - np.log(num_samples)
         return ll
 
-    def estimate_ll_per_bit(self, x_obs, num_samples):             
+    def estimate_ll_per_bit(self, x_obs, num_samples):
         with torch.no_grad():
             # log 1/N \sum_{n} p(x, z_n)/q(z_n|x)
             # [N, B, K], [N, B, K], [N, B, H]
-            f, y, z = self.q.sample(x_obs, (num_samples,))        
+            f, y, z = self.q.sample(x_obs, (num_samples,))
             # [N, B, D]
             log_p = self.p.log_prob(f=f, y=y, z=z, x=x_obs, per_bit=True)
             # [N, B]
             log_q = self.q.log_prob(z=z, f=f, y=y, x=x_obs)
             # [B, D]
-            ll = torch.logsumexp(log_p - log_q.unsqueeze(-1), 0) - np.log(num_samples)                   
-        return ll    
-    
+            ll = torch.logsumexp(log_p - log_q.unsqueeze(-1), 0) - np.log(num_samples)
+        return ll
+
