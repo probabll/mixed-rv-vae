@@ -74,8 +74,8 @@ def make_state(args: namedtuple, device: str, ckpt_path: str = None, load_opt=Tr
         z_dim=args.z_dim, 
         data_dim=args.height * args.width, 
         hidden_enc_size=args.hidden_enc_size,
-        shared_concentrations=args.shared_concentrations,
-        share_fy_net=args.share_fy_net,
+        #shared_concentrations=args.shared_concentrations,
+        shared_enc_fy=args.shared_enc_fy,
         p_drop=args.inf_p_drop,
         posterior_f=args.posterior_f,
         posterior_y=args.posterior_y,
@@ -217,6 +217,8 @@ def main(args: namedtuple):
             ckpt_path=args.load_ckpt,
             load_opt=not args.reset_opt
         )
+        print('Generative model\n', state.p)
+        print('Inference model\n', state.q)
 
         # Training 
         

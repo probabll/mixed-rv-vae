@@ -1,7 +1,7 @@
 import argparse
 import distutils
 import json
-from collections import OrderedDict
+from collections import OrderedDict, namedtuple
 import sys
 
 
@@ -21,16 +21,19 @@ def arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--seed', default=10, type=int)
     parser.add_argument('--device', default='cuda:0', type=str)
     parser.add_argument('--z_dim', default=32, type=int)
-    parser.add_argument('--prior_z', default='gaussian 0.0 1.0', type=str)
+    parser.add_argument('--prior_z', default='gaussian 0.0 1.0', type=str,
+            help="This is a reparameterisable variable. Options: 'gaussian loc scale';  'dirichlet concentration'; 'onehotcat temperature logit'; 'gaussian-sparsemax-max-ent bit-precision'")
     parser.add_argument('--y_dim', default=0, type=int)
-    parser.add_argument('--prior_f', default='gibbs 0.0', type=str)
-    parser.add_argument('--prior_y', default='dirichlet 1.0', type=str)
+    parser.add_argument('--prior_f', default='gibbs 0.0', type=str,
+            help="This is a truly discrete variable. Options: 'gibbs logit'; 'gibbs-max-ent bit-precision'; 'categorical logit'")
+    parser.add_argument('--prior_y', default='dirichlet 1.0', type=str,
+            help="This is a reparameterisable variable. Options: 'dirichlet (lower-concentration upper-concentration)'; 'identity'")
     parser.add_argument('--hidden_dec_size', default=500, type=int)
     parser.add_argument('--posterior_z', default='gaussian', type=str)
     parser.add_argument('--posterior_f', default='gibbs -10 10', type=str)
     parser.add_argument('--posterior_y', default='dirichlet 1e-3 1e3', type=str)
-    parser.add_argument('--shared_concentrations', default=True, type=str2bool)
-    parser.add_argument('--share_fy_net', default=False, type=str2bool)
+    #parser.add_argument('--shared_concentrations', default=True, type=str2bool)
+    parser.add_argument('--shared_enc_fy', default=True, type=str2bool)
     parser.add_argument('--mean_field', default=True, type=str2bool)
     parser.add_argument('--hidden_enc_size', default=500, type=int)
     parser.add_argument('--epochs', default=200, type=int)
@@ -98,3 +101,5 @@ def parse_args():
             args = parser.parse_args(namespace=t_args)
     return args
 
+def make_args(cfg: dict):
+    return namedtuple("Config", cfg.keys())(*cfg.values())

@@ -5,7 +5,8 @@ import torch.distributions as td
 import probabll.distributions as pd
 import torch.nn as nn
 from collections import OrderedDict, deque
-from gaussiansp import GaussianSparsemax, GaussianSparsemaxPrior
+#from gaussiansp import GaussianSparsemax, GaussianSparsemaxPrior
+from vladsgsp import GaussianSparsemax, GaussianSparsemaxPrior
 
 
 @td.register_kl(td.RelaxedOneHotCategorical, td.Dirichlet)
@@ -81,20 +82,26 @@ class GenerativeModel(nn.Module):
                  prior_z='gaussian 0.0 1.0'
             ):
         """        
-        :param y_dim: dimensionality (K) of the mixed rv
-        :param z_dim: dimensionality (H) of the Gaussian rv (use 0 to disable it)
-        :param data_dim: dimensionality (D) of the observation
-        :oaram hidden_dec_size: hidden size of the decoder that parameterises X|Z=z, Y=y
-        :param p_drop: dropout probability
-        :param prior_scores: \omega in F|\omega 
-            (float or K-dimensional tensor)
-        :param prior_location: location of the Gaussian prior
-            (float or H-dimensional tensor)
-        :param prior_scale: scale of the Gaussian prior
-            (float or H-dimensional tensor)
-        :param z_dist: 'gaussian' or 'dirichlet'
-            if 'dirichlet' we use prior_scale as the Dirichlet concentration 
-            and ignore prior_location
+
+        Parameters: 
+            y_dim: dimensionality (K) of the mixed rv
+            z_dim: dimensionality (H) of the Gaussian rv (use 0 to disable it)
+            data_dim: dimensionality (D) of the observation
+            hidden_dec_size: hidden size of the decoder that parameterises X|Z=z, Y=y
+            p_drop: dropout probability
+            prior_f: available options are
+                gibbs score
+                gibbs-max-ent bit-precision
+                categorical logit
+            prior_y: available options are
+                dirichlet concentration
+                identity
+            prior_z: available options are
+                gaussian loc scale
+                dirichlet concentration
+                concrete temperature logit
+                onehotcat temperature logit  -- this is GumbelSoftmax-ST
+                gaussian-sparsemax-max-ent bit-precision
         """
         super().__init__()
         self._y_dim = y_dim
@@ -173,7 +180,7 @@ class GenerativeModel(nn.Module):
     def y_dim(self):
         return self._y_dim
     
-    def Z(self, predictors=None):
+    def Z(self):
         """Return a Normal distribution over latent space"""
         if self._z_dim:            
             if self._z_dist == 'gaussian':
@@ -195,10 +202,12 @@ class GenerativeModel(nn.Module):
             Z = td.Independent(pd.Delta(self._prior_z_location), 1)
         return Z
 
-    def F(self, predictors=None):
+    def F(self, state=dict()):
         """
         Return a distribution over the non-empty faces of the simplex
-        :param predictors: input predictors, this is reserved for future use
+
+        Parameters:
+            state: save computations that can be used downstream by the hierarchical model
         """
         if self._y_dim:
             if self._f_dist == 'gibbs':
@@ -210,11 +219,13 @@ class GenerativeModel(nn.Module):
         else:
             return td.Independent(pd.Delta(self._prior_f_location), 1)
 
-    def Y(self, f, predictors=None):
+    def Y(self, f, state=dict()):
         """
         Return a batch of masked Dirichlet distributions Y|F=f
-        :param f: face-encoding [batch_size, K]
-        :param predictors: input predictors, this is reserved for future use
+
+        Parameters:
+            f: face-encoding [batch_size, K]
+            state: used to save computations relevant to the hierarchical model
         """
         if self._y_dim:
             if self._y_dist == 'dirichlet':
@@ -224,7 +235,7 @@ class GenerativeModel(nn.Module):
         else:
             return td.Independent(pd.Delta(torch.zeros_like(f)), 1)
 
-    def X(self, y, z, predictors=None):
+    def X(self, y, z):
         """Return a product of D Bernoulli distributions"""
         if z.shape[:-1] != y.shape[:-1]:
             raise ValueError("z and y must have the same batch_shape")        
@@ -285,7 +296,30 @@ class InferenceModel(nn.Module):
                  posterior_z='gaussian', 
                  posterior_f='gibbs -10 10',
                  posterior_y='dirichlet 1e-3 1e3',
-                 mean_field=True, shared_concentrations=True, share_fy_net=False):
+                 mean_field=True, 
+                 shared_enc_fy=True):
+        """
+        Parameters:
+            y_dim (int): use more than 0 to introduce a mixed-rv
+            z_dim (int): use more than 0 to introduce a fully reparameterisable rv
+            data_dim (int):
+            hidden_enc_size (int): size of the hidden layer for encoders (from x to parameters)
+            p_drop (float): dropout probability (defaults to 0.0 as dropout in inference nets is not super justified)
+            posterior_z (str): available options are
+                gaussian (lower-loc upper-loc)
+                dirichlet (lower-concentration upper-concentration)
+                concrete (lower-logit upper-logit)
+                onehotcat (lower-logit upper-logit)
+                gaussian-sparsemax (lower-loc upper-loc)
+            posterior_f (str): available options are
+                gibbs (lower-score upper-score)
+                categorical (lower-score upper-score)
+            posterior_y (str):
+                dirichlet (lower-concentration upper-concentration)
+                identity
+            mean_field (bool): whether to model q(y|x)q(z|x) versus q(y|x)q(z|x,y)
+            shared_enc_fy (bool): 
+        """
         assert z_dim + y_dim > 0
         assert parse_posterior_name(posterior_z)[0] in ['gaussian', 'dirichlet', 'concrete', 'onehotcat', 'gaussian-sparsemax'], "Unknown choice of distribution for Z|x"
         assert parse_posterior_name(posterior_f)[0] in ['gibbs', 'categorical'], "Unknown choice of distribution for F|x"
@@ -301,9 +335,47 @@ class InferenceModel(nn.Module):
         self._z_dist, self._z_params = parse_posterior_name(posterior_z)
 
         self._mean_field = mean_field
-        self._shared_concentrations = shared_concentrations
-        self._share_fy_net = share_fy_net
+        self._shared_enc_fy = shared_enc_fy
         
+        # Y|X=x
+        if y_dim:
+            if shared_enc_fy:
+                self._enc_for_fy = nn.Sequential(
+                    nn.Dropout(p_drop),
+                    nn.Linear(data_dim, hidden_enc_size),
+                    nn.ReLU(),
+                    nn.Dropout(p_drop),
+                    nn.Linear(hidden_enc_size, hidden_enc_size),
+                    nn.ReLU(),
+                )
+            else:
+                self._enc_for_f = nn.Sequential(
+                    nn.Dropout(p_drop),
+                    nn.Linear(data_dim, hidden_enc_size),
+                    nn.ReLU(),
+                    nn.Dropout(p_drop),
+                    nn.Linear(hidden_enc_size, hidden_enc_size),
+                    nn.ReLU(),
+                )
+                self._enc_for_y = nn.Sequential(
+                    nn.Dropout(p_drop),
+                    nn.Linear(data_dim + y_dim, hidden_enc_size),
+                    nn.ReLU(),
+                    nn.Dropout(p_drop),
+                    nn.Linear(hidden_enc_size, hidden_enc_size),
+                    nn.ReLU(),
+                )
+            self._f_scores = nn.Sequential(
+                nn.Dropout(p_drop),
+                nn.Linear(hidden_enc_size, y_dim)
+            )
+            self._y_concentrations = nn.Sequential(
+                nn.Dropout(p_drop),
+                nn.Linear(hidden_enc_size, y_dim),
+                nn.Softplus()
+            )
+
+        # Z|X=x, Y=y
         if z_dim: 
             z_num_params = 2 * z_dim if self._z_dist in ['gaussian', 'gaussian-sparsemax'] else z_dim
             self._zparams_net = nn.Sequential(
@@ -316,40 +388,7 @@ class InferenceModel(nn.Module):
                 nn.Linear(hidden_enc_size, z_num_params)
             )
         
-        if y_dim:
-            if shared_concentrations and share_fy_net:
-                self._scores_and_concs_net = nn.Sequential(
-                    nn.Dropout(p_drop),
-                    nn.Linear(data_dim, hidden_enc_size),
-                    nn.ReLU(),
-                    nn.Dropout(p_drop),
-                    nn.Linear(hidden_enc_size, hidden_enc_size),
-                    nn.ReLU(),
-                    nn.Linear(hidden_enc_size, y_dim * 2)
-                )
-            else:
-                self._scores_net = nn.Sequential(
-                    nn.Dropout(p_drop),
-                    nn.Linear(data_dim, hidden_enc_size),
-                    nn.ReLU(),
-                    nn.Dropout(p_drop),
-                    nn.Linear(hidden_enc_size, hidden_enc_size),
-                    nn.ReLU(),
-                    nn.Linear(hidden_enc_size, y_dim)
-                )
-
-                self._concentrations_net = nn.Sequential(
-                    nn.Dropout(p_drop),
-                    nn.Linear(data_dim if shared_concentrations else y_dim + data_dim, hidden_enc_size),
-                    nn.ReLU(),
-                    nn.Dropout(p_drop),
-                    nn.Linear(hidden_enc_size, hidden_enc_size),
-                    nn.ReLU(),
-                    nn.Dropout(p_drop),
-                    nn.Linear(hidden_enc_size, y_dim),
-                    nn.Softplus()
-                )
-                
+    
     @property
     def mean_field(self):
         return self._mean_field
@@ -365,7 +404,7 @@ class InferenceModel(nn.Module):
             y, x  = self._match_sample_shape(y, x)
         return x, y
             
-    def Z(self, x, y, predictors=None):  
+    def Z(self, x, y):  
         x, y = self._match_sample_shape(x, y)
         if self._z_dim:
             inputs = x if self._mean_field else torch.cat([y, x], -1)
@@ -378,7 +417,7 @@ class InferenceModel(nn.Module):
             elif self._z_dist == 'gaussian-sparsemax':
                 loc, scale = params[..., :self._z_dim], nn.functional.softplus(params[..., self._z_dim:])
                 if len(self._z_params) == 2:  # we are clamping scales
-                    scale = torch.clamp(scales, self._z_params[0], self._z_params[1])
+                    scale = torch.clamp(scale, self._z_params[0], self._z_params[1])
                 Z = GaussianSparsemax(loc=loc, scale=scale)
             elif self._z_dist == 'dirichlet':
                 conc = nn.functional.softplus(params)
@@ -399,8 +438,49 @@ class InferenceModel(nn.Module):
         else:
             Z = td.Independent(pd.Delta(torch.zeros(x.shape[:-1] + (0,), device=x.device)), 1)
         return Z
+
+
+    def F(self, x, state=dict()):
+        if not self._y_dim:
+            F = td.Independent(pd.Delta(torch.zeros(x.shape[:-1] + (0,), device=x.device)), 1)
+        else:
+            if self._shared_enc_fy:
+                h = self._enc_for_fy(x)
+                state['encoded-x'] = h
+            else:
+                h = self._enc_for_f(x)
+            scores = self._f_scores(h)
+            state['scores'] = scores
+            if len(self._f_params) == 2: # we are clamping scores
+                scores = torch.clamp(scores, self._f_params[0], self._f_params[1])
+
+            if self._f_dist == 'gibbs':
+                F = pd.NonEmptyBitVector(scores)
+            elif self._f_dist == 'categorical':
+                F = td.OneHotCategorical(logits=scores)
+        return F
+    
+    def Y(self, x, f, state=dict()):
+        x, f = self._match_sample_shape(x, f)
+        if not self._y_dim:
+            Y = td.Independent(pd.Delta(torch.zeros_like(f)), 1)
+        else:
+            if self._y_dist == 'identity':
+                Y = td.Independent(pd.Delta(f), 1)
+            else:
+                if self._shared_enc_fy:
+                    h = state['encoded-x'] if 'encoded-x' in state else self._enc_for_fy(x)
+                    h, f = self._match_sample_shape(h, f)
+                else:
+                    h = self._enc_for_y(torch.cat([f, x], -1))
+                concentrations = self._y_concentrations(h) 
+                if len(self._y_params) == 2:  # we are clamping concentrations
+                    concentrations = torch.clamp(concentrations, self._y_params[0], self._y_params[1])
+                Y = pd.MaskedDirichlet(f.bool(), concentrations)
+        return Y
+
             
-    def F(self, x, predictors=None):
+    def _F(self, x, predictors=None):
         if not self._y_dim:
             return td.Independent(pd.Delta(torch.zeros(x.shape[:-1] + (0,), device=x.device)), 1)
         # [B, K]
@@ -416,8 +496,7 @@ class InferenceModel(nn.Module):
         elif self._f_dist == 'categorical':
             return td.OneHotCategorical(logits=scores)
 
-
-    def Y(self, x, f, predictors=None):
+    def _Y(self, x, f, predictors=None):
         x, f = self._match_sample_shape(x, f)
         if not self._y_dim:
             return td.Independent(pd.Delta(torch.zeros_like(f)), 1)
@@ -442,22 +521,28 @@ class InferenceModel(nn.Module):
 
     def sample(self, x, sample_shape=torch.Size([])):
         """Return (f, y, z), No gradients through this."""
-        with torch.no_grad():            
+        with torch.no_grad():     
+            # [sample_shape, B, D]
+            x = x.expand(sample_shape + x.shape) 
+            state = dict()
             # [sample_shape, B, K]
-            f = self.F(x).sample(sample_shape)
+            f = self.F(x, state=state).sample()
             # [sample_shape, B, K]
-            y = self.Y(f=f, x=x).sample()
+            y = self.Y(f=f, x=x, state=state).sample()
             # [sample_shape, B, H]
             z = self.Z(x=x, y=y).sample()
             return f, y, z
     
     def log_prob(self, x, f, y, z, reduce=True):
         """log q(f|x), log q(y|f, x), log q(z|y, x)"""
+        state = dict()
+        log_prob_f = self.F(x, state=state).log_prob(f)
+        log_prob_y = self.Y(x=x, f=f, state=state).log_prob(y)
+        log_prob_z = self.Z(x=x, y=y).log_prob(z)
         if reduce:
-
-            return self.F(x).log_prob(f) + self.Y(x=x, f=f).log_prob(y) + self.Z(x=x, y=y).log_prob(z)
+            return log_prob_f + log_prob_y + log_prob_z
         else:
-            return self.F(x).log_prob(f), self.Y(x=x, f=f).log_prob(y), self.Z(x=x, y=y).log_prob(z)
+            return log_prob_f, log_prob_y, log_prob_z
     
 
 class VAE:
@@ -487,7 +572,7 @@ class VAE:
     def inf_parameters(self):
         return self.q.parameters()   
     
-    def critic(self, x_obs, z, q_F):
+    def critic(self, x_obs, z, q_F, state):
         """This estimates reward (w.r.t sampling of F) on a single sample for variance reduction"""
         S, B, H, K, D = x_obs.shape[0], x_obs.shape[1], self.p.z_dim, self.p.y_dim, self.p.data_dim
         with torch.no_grad():            
@@ -495,7 +580,7 @@ class VAE:
             # [S, B, K]
             f = q_F.sample((S,))  # we resample f
             assert_shape(f, (S, B, K), "f ~ F|X=x, \lambda")
-            q_Y = self.q.Y(x=x_obs, f=f)  # and thus also resample y
+            q_Y = self.q.Y(x=x_obs, f=f, state=state)  # and thus also resample y
             #if q_Y.batch_shape != (S, B):
             #    q_Y = q_Y.expand((S, B))
             # [S, B, K]
@@ -558,13 +643,14 @@ class VAE:
         with torch.no_grad():
             B, H, K, D = x_obs.shape[0], self.p.z_dim, self.p.y_dim, self.p.data_dim            
 
+            fy_state = dict()
             # Posterior approximations and samples
-            q_F = self.q.F(x_obs)
+            q_F = self.q.F(x_obs, state=fy_state)
             # [B, K]
             f = q_F.sample() # not rsample
             assert_shape(f, (B, K), "f ~ F|X=x, \lambda")
 
-            q_Y = self.q.Y(x=x_obs, f=f)
+            q_Y = self.q.Y(x=x_obs, f=f, state=fy_state)
             y = q_Y.rsample()
             assert_shape(y, (B, K), "y ~ Y|X=x, F=f, \lambda")
             
@@ -623,7 +709,8 @@ class VAE:
         S, B, H, K, D = num_samples, x_obs.shape[0], self.p.z_dim, self.p.y_dim, self.p.data_dim  # S > 1
 
         # Approximate posteriors and samples
-        q_F = self.q.F(x_obs)
+        fy_state = dict()
+        q_F = self.q.F(x_obs, state=fy_state)
         
         if exact_marginal:
             # [S, B, K]
@@ -632,12 +719,13 @@ class VAE:
         else:
             # [S, B, K]
             f = q_F.sample((S,)) # not rsample
+
         assert_shape(f, (S, B, K), "f ~ F|X=x, \lambda")
         
         # [S, B, D]
         x_obs = x_obs.expand((S, B, D))
-
-        q_Y = self.q.Y(x=x_obs, f=f)
+        
+        q_Y = self.q.Y(x=x_obs, f=f, state=fy_state)
         # [S, B, K]
         y = q_Y.rsample()  # with reparameterisation! (important)
         assert_shape(y, (S, B, K), "y ~ Y|F=f, \lambda")
@@ -728,7 +816,7 @@ class VAE:
                     criticised_reward = reward - critic.detach() 
                 else:
                     # [S, B]
-                    criticised_reward = reward - self.critic(x_obs, z=z, q_F=q_F).detach()
+                    criticised_reward = reward - self.critic(x_obs, z=z, q_F=q_F, state=fy_state).detach()
             else:
                 criticised_reward = reward
             if self.use_reward_standardisation:

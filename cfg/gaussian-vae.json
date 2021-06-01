@@ -4,6 +4,7 @@
     "height": 28,
     "width": 28, 
     "output_dir": "neurips-mixed-rv/gaussian-vae/0",
+    "data_dir": "tmp",
     "device": "cuda:0",
     "y_dim": 0,    
     "z_dim": 10,
