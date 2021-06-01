@@ -8,6 +8,7 @@ import torch.distributions as td
 from torch.distributions import constraints
 from torch.distributions.utils import _standard_normal, broadcast_all
 
+import probabll.distributions as pd
 from entmax import sparsemax
 
 # numeric magic, VERY IMPORTANT
@@ -175,9 +176,9 @@ class GaussianSparsemax(td.Distribution):
         adj_scale = torch.sqrt(inv_sum_inv_vars)
 
         # [B, S]
-        T = (adj_loc + adj_scale).unsqueeze(dim=-1) * t0
+        T = adj_loc.unsqueeze(dim=-1) + adj_scale.unsqueeze(dim=-1) * t0
         # [B, 1, S]
-        T = T.unsqueeze(dim=-2)  # TODO: what did Vlad want?
+        T = T.unsqueeze(dim=-2)
 
         # [B, K, 1]
         loc_ = loc.unsqueeze(dim=-1)
@@ -282,9 +283,6 @@ def _kl_gaussiansparsemax_gaussiansparsemax(p, q):
     return (p.log_prob(x) - q.log_prob(x)).mean(dim=0)
 
 
-import probabll.distributions as pd
-
-
 class GaussianSparsemaxPrior(td.Distribution):
 
     def __init__(self, pF, alpha_net, validate_args=False):
@@ -310,6 +308,7 @@ class GaussianSparsemaxPrior(td.Distribution):
         f = (value > 0).float()
         Y = pd.MaskedDirichlet(f.bool(), self.alpha_net(f))
         return self.pF.log_prob(f) + Y.log_prob(value)
+
 
 @td.register_kl(GaussianSparsemax, GaussianSparsemaxPrior)
 def _kl_gaussiansparsemax_gaussiansparsemaxprior(p, q):
