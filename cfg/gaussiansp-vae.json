@@ -1,6 +1,6 @@
 {
     "seed": 10,
-    "batch_size": 100,
+    "batch_size": 500,
     "height": 28,
     "width": 28, 
     "output_dir": "neurips-mixed-rv/gaussiansp-vae/0",
@@ -10,17 +10,19 @@
     "z_dim": 10,
     "prior_z": "gaussian-sparsemax-max-ent 0",
     "hidden_dec_size": 500,
-    "posterior_z": "gaussian-sparsemax -10 10",
+    "posterior_z": "gaussian-sparsemax 0.001 1000 -100 100",
     "hidden_enc_size": 500,    
     "epochs": 500,    
-    "num_samples": 100,    
+    "num_samples": 10,    
     "gen_opt": "adam",
-    "gen_lr": 1e-4,
+    "gen_lr": 5e-4,
     "gen_l2": 0.0,
     "gen_p_drop": 0.0,  
     "inf_opt": "adam",
-    "inf_lr": 1e-4,  
+    "inf_lr": 5e-4,  
     "inf_l2": 1e-6,  
     "inf_p_drop": 0.1, 
-    "grad_clip": 1.0
+    "grad_clip": 1.0,
+    "gsp_cdf_samples": 1000,
+    "gsp_KL_samples": 1
 }

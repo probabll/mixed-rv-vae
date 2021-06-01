@@ -26,8 +26,8 @@
     "inf_l2": 1e-06,
     "inf_p_drop": 0.1,
     "grad_clip": 1.0,
-    "use_self_critic": 0,
-    "use_reward_standardisation": 1,
+    "use_self_critic": 1,
+    "use_reward_standardisation": 0,
     "project": "neurips21-submission",
     "prior_z": "gaussian 0.0 1.0",
     "posterior_z": "gaussian",
@@ -36,5 +36,6 @@
     "load_ckpt": null,
     "reset_opt": false,
     "exact_marginal": false,
+    "exact_KL_Y": false,
     "tqdm": false
 }

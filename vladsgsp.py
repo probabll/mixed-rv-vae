@@ -29,8 +29,10 @@ class GaussianSparsemax(td.Distribution):
         """Generate a list of 2**K - 1 bit vectors indicating all possible faces of a K-dimensional simplex."""
         return list(product([0, 1], repeat=K))[1:]
 
-    def __init__(self, loc, scale, validate_args=None):
+    def __init__(self, loc, scale, cdf_samples=100, KL_samples=1, validate_args=None):
         self.loc, self.scale = broadcast_all(loc, scale)
+        self._cdf_samples = cdf_samples
+        self._KL_samples = KL_samples
         batch_shape, event_shape = self.loc.shape[:-1], self.loc.shape[-1:]
         super().__init__(batch_shape, event_shape, validate_args=validate_args)
 
@@ -39,6 +41,8 @@ class GaussianSparsemax(td.Distribution):
         batch_shape = torch.Size(batch_shape)
         new.loc = self.loc.expand(batch_shape + self.event_shape)
         new.scale = self.scale.expand(batch_shape + self.event_shape)
+        new._cdf_samples = self._cdf_samples
+        new._KL_samples = self._KL_samples
         super(GaussianSparsemax, new).__init__(batch_shape, self.event_shape, validate_args=False)
         new._validate_args = self._validate_args
         return new
@@ -59,7 +63,11 @@ class GaussianSparsemax(td.Distribution):
         return log_prob
 
     def log_prob(self, y, pivot_alg='first', tiny=1e-9, huge=1e9,
-            n_samples=1000):
+            n_samples=None):
+
+        if n_samples is None:
+            n_samples = self._cdf_samples
+
         K = y.shape[-1]
 
         # create a single zero with the same dtype and device sa y
@@ -98,7 +106,8 @@ class GaussianSparsemax(td.Distribution):
         # Pivot mean and variance
         # [B]
         t_mean = torch.where(pivot_indicator, loc, zero).sum(-1)
-        t_var = torch.where(pivot_indicator, var, zero).sum(-1)
+        t_scale = torch.where(pivot_indicator, scale, zero).sum(-1)
+        #t_var = torch.where(pivot_indicator, var, zero).sum(-1)
 
         # Difference with respect to the pivot
         # [B, K]
@@ -109,21 +118,38 @@ class GaussianSparsemax(td.Distribution):
 
         # Joint log pdf for the non-zeros
         # [B, K, K]
-        diag = torch.diag_embed(torch.where(others, var, var.new_ones(1)))
-        offset = t_var.unsqueeze(-1).unsqueeze(-1)
+        #diag = torch.diag_embed(torch.where(others, var, var.new_ones(1)))
+        #offset = t_var.unsqueeze(-1).unsqueeze(-1)
+
+        # A = diag(d)
+        # u = t_var * 1
+        # v = 1
+        # inv(A) = diag(1/d)
+
+        # pdf:
+        # 2pi ^ {-k/2} det(cov)^{-1/2} exp(-1/2*(x-mu)Tcov^{-1} (x-mu))
+        
+        # [B, K]
+        cov_diag = torch.where(others, var, var.new_ones(1))
+        # [B, K, rank=1]
+        # others: [B, K], t_scale: [B], the final unsqueeze creates the rank=1 dimension
+        cov_factor = torch.where(others, t_scale.unsqueeze(-1), zero).unsqueeze(-1)
 
         # We need a multivariate normal for the non-zero coordinates in `other`
         # but to batch mvns we will need to use K-by-K covariances
         # we can do so by embedding the lower-dimensional mvn in a higher dimensional mvn
         # with cov=I.
         # [B, K, K]
-        cov_mask = others.unsqueeze(-1) * others.unsqueeze(-2)
-        cov = torch.where(cov_mask, diag + offset, diag)
-
+        #cov_mask = others.unsqueeze(-1) * others.unsqueeze(-2)
+        #cov = torch.where(cov_mask, diag + offset, diag)
+        
         # This computes log prob of y[other] under  the lower dimensional mvn
         # times log N(0|0,1) for the other dimensions
         # [B]
-        log_prob = td.MultivariateNormal(mean_diff, cov).log_prob(y_diff)
+        #log_prob = td.MultivariateNormal(mean_diff, cov).log_prob(y_diff)
+        # [B]
+        log_prob = td.LowRankMultivariateNormal(mean_diff, cov_diag=cov_diag, cov_factor=cov_factor).log_prob(y_diff)
+        #log_prob = torch.zeros(loc.shape[:-1], device=loc.device)
         # so we discount the contribution from the masked coordinates
         # [B, K]
         log_prob0 = td.Normal(torch.zeros_like(mean_diff), torch.ones_like(mean_diff)).log_prob(torch.zeros_like(y_diff))
@@ -137,23 +163,22 @@ class GaussianSparsemax(td.Distribution):
         # [B]
         inv_sum_inv_vars = (torch.where(face, inv_vars, zero)
                             .sum(dim=-1).reciprocal())
-        zscore = (y - loc) / var  # TODO: ask Vlad whether he meant var or scale?
+        zscore = (y - loc) / var  
         # [B]
         zsc_nz = torch.where(face, zscore, zero).sum(dim=-1)
 
-        # monte carlo sample, SHARED noise (not necessarily)
-        # to make noise be not shared, use [B x S] here
+        # monte carlo sample (possible optimisation: share noise across instances in batch, it should be safe from an MC point of view)
         # [B, S]
-        t0 = torch.randn(loc.shape[:-1] + (n_samples,), dtype=y.dtype, device=y.device)
+        t0 = torch.randn(tuple(1 for _ in loc.shape[:-1]) + (n_samples,), dtype=y.dtype, device=y.device)
 
         # [B]
         adj_loc = (-inv_sum_inv_vars * zsc_nz) 
         adj_scale = torch.sqrt(inv_sum_inv_vars) 
 
         # [B, S]
-        T = (adj_loc + adj_scale).unsqueeze(-1) * t0
+        T = (adj_loc + adj_scale).unsqueeze(dim=-1) * t0
         # [B, 1, S]
-        T = T.unsqueeze(-2)  # TODO: what did Vlad want?
+        T = T.unsqueeze(dim=-2)  # TODO: what did Vlad want?
 
         # [B, K, 1]
         loc_ = loc.unsqueeze(dim=-1)
@@ -166,12 +191,13 @@ class GaussianSparsemax(td.Distribution):
         log_cdf_1d = log_ndtr(T_zsc)
 
         # [B, S]
-        # log_cdf_1d = (log_cdf_1d * unface.unsqueeze(dim=2)).sum(dim=1)
+        # we mask and reduce_sum over k in [K] (the zeros)
         log_cdf_1d = (torch.where(face.unsqueeze(dim=-1), zero, log_cdf_1d)
-                      .sum(dim=-1))
+                      .sum(dim=-2))
         log_cdf_1d -= np.log(n_samples)
 
         # [B]
+        # reduce the sample dimension
         log_cdf = torch.logsumexp(log_cdf_1d, dim=-1)
 
         ## VLAD code ends
@@ -182,7 +208,10 @@ class GaussianSparsemax(td.Distribution):
         # [B]
         return log_prob + log_cdf + log_det
 
-    def log_prob_IS(self, y, n_samples=1000):
+    def log_prob_IS(self, y, n_samples=None):
+
+        if n_samples is None:
+            n_samples = self._cdf_samples
 
         assert y.shape[:-1] == self.batch_shape, f"For now I need the same batch_shape: {y.shape} got {y.shape[:-1]} instead of {self.batch_shape}"
 
@@ -249,8 +278,9 @@ class GaussianSparsemax(td.Distribution):
 
 @td.register_kl(GaussianSparsemax, GaussianSparsemax)
 def _kl_gaussiansparsemax_gaussiansparsemax(p, q):
-    x = p.rsample()
-    return p.log_prob(x) - q.log_prob(x)
+    # [S, ...]
+    x = p.rsample((p._KL_samples,))
+    return (p.log_prob(x) - q.log_prob(x)).mean(dim=0)
 
 
 import probabll.distributions as pd
@@ -284,8 +314,9 @@ class GaussianSparsemaxPrior(td.Distribution):
     
 @td.register_kl(GaussianSparsemax, GaussianSparsemaxPrior)
 def _kl_gaussiansparsemax_gaussiansparsemaxprior(p, q):
-    x = p.rsample()
-    return p.log_prob(x) - q.log_prob(x)
+    # [S, ...]
+    x = p.rsample((p._KL_samples,))
+    return (p.log_prob(x) - q.log_prob(x)).mean(dim=0)
 
 
 def test_dtypes():

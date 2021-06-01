@@ -81,6 +81,8 @@ def make_state(args: namedtuple, device: str, ckpt_path: str = None, load_opt=Tr
         posterior_y=args.posterior_y,
         posterior_z=args.posterior_z,
         mean_field=args.mean_field,
+        gsp_cdf_samples=args.gsp_cdf_samples,
+        gsp_KL_samples=args.gsp_KL_samples,
     )
     
     # Checkpoints
@@ -133,7 +135,7 @@ def get_batcher(data_loader, args, binarize=True, num_classes=10, onehot=True):
     return batcher
 
 
-def validate(vae: VAE, batcher: Batcher, num_samples: int, compute_DR=False):
+def validate(vae: VAE, batcher: Batcher, num_samples: int, compute_DR=False, exact_KL_Y=False, progressbar=False):
     """
     Return average NLL
         average number of bits per dimension
@@ -146,7 +148,8 @@ def validate(vae: VAE, batcher: Batcher, num_samples: int, compute_DR=False):
         nb_bits = 0.
         ll = 0.
         DR = OrderedDict()
-        for x_obs, y_obs in batcher:
+        iterator = tqdm(batcher) if progressbar else iter(batcher)
+        for x_obs, y_obs in iterator:
             # [B, H*W]
             x_obs = x_obs.reshape(-1, vae.p.data_dim)     
             # [B]
@@ -155,7 +158,7 @@ def validate(vae: VAE, batcher: Batcher, num_samples: int, compute_DR=False):
             nb_obs += x_obs.shape[0]
             # []
             if compute_DR:
-                ret = vae.DR(x_obs)
+                ret = vae.DR(x_obs, exact_KL_Y=exact_KL_Y)
                 for k, v in ret.items():
                     if k not in DR:
                         DR[k] = []
@@ -232,8 +235,9 @@ def main(args: namedtuple):
         ), file=sys.stdout)    
        
         
-        print("# Training", file=sys.stdout)
-        val_metrics = validate(state.vae, get_batcher(valid_loader, args), args.num_samples, compute_DR=True)
+        print("# Checking initial model", file=sys.stdout)
+        val_metrics = validate(state.vae, get_batcher(valid_loader, args), args.num_samples, 
+                compute_DR=True, exact_KL_Y=args.exact_KL_Y, progressbar=args.tqdm)
         dr_string = ' '.join(f"{k}={v.mean():.2f}" for k, v in val_metrics[2].items())
         print(f'Validation {0:3d}: nll={val_metrics[0]:.2f} bpd={val_metrics[1]:.2f} {dr_string}', file=sys.stdout)
 
@@ -246,6 +250,7 @@ def main(args: namedtuple):
         #    state.q_opt, mode='min', factor=0.1, patience=10, threshold=0.1, verbose=True
         #)
 
+        print("# Training", file=sys.stdout)
         for epoch in range(args.epochs):
 
             if args.tqdm:
@@ -266,7 +271,8 @@ def main(args: namedtuple):
 
                 loss, ret = state.vae.loss(x_obs, c_obs, 
                     num_samples=args.training_samples, samples=samples, images=images, 
-                    exact_marginal=args.exact_marginal
+                    exact_marginal=args.exact_marginal,
+                    exact_KL_Y=args.exact_KL_Y,
                 )
 
                 for k, v in ret.items():
@@ -295,7 +301,8 @@ def main(args: namedtuple):
                         wandb.log({f"training.{k}": wandb.Image(v) for k, v in images.items()})
 
 
-            val_metrics = validate(state.vae, get_batcher(valid_loader, args), args.num_samples, compute_DR=True)
+            val_metrics = validate(state.vae, get_batcher(valid_loader, args), args.num_samples, 
+                    compute_DR=True, exact_KL_Y=args.exact_KL_Y, progressbar=args.tqdm)
     
             #p_scheduler.step(val_metrics[0])
             #q_scheduler.step(val_metrics[0])
@@ -321,7 +328,8 @@ def main(args: namedtuple):
         
         print("# Final validation run")
         val_nll, val_bpd, val_DR = validate(
-            state.vae, get_batcher(valid_loader, args), args.num_samples, compute_DR=True)
+            state.vae, get_batcher(valid_loader, args), args.num_samples, 
+            compute_DR=True, exact_KL_Y=args.exact_KL_Y, progressbar=args.tqdm)
         rows = [('NLL', val_nll, None), ('BPD', val_bpd, None)]
         for k, v in val_DR.items():
             rows.append((k, v.mean(), v.std()))

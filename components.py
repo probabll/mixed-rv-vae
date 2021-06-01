@@ -297,7 +297,10 @@ class InferenceModel(nn.Module):
                  posterior_f='gibbs -10 10',
                  posterior_y='dirichlet 1e-3 1e3',
                  mean_field=True, 
-                 shared_enc_fy=True):
+                 shared_enc_fy=True,
+                 gsp_cdf_samples=None,
+                 gsp_KL_samples=None,
+                 ):
         """
         Parameters:
             y_dim (int): use more than 0 to introduce a mixed-rv
@@ -333,6 +336,9 @@ class InferenceModel(nn.Module):
         self._f_dist, self._f_params = parse_posterior_name(posterior_f)
         self._y_dist, self._y_params = parse_posterior_name(posterior_y)
         self._z_dist, self._z_params = parse_posterior_name(posterior_z)
+
+        self._gsp_cdf_samples = gsp_cdf_samples
+        self._gsp_KL_samples = gsp_KL_samples
 
         self._mean_field = mean_field
         self._shared_enc_fy = shared_enc_fy
@@ -411,14 +417,18 @@ class InferenceModel(nn.Module):
             params = self._zparams_net(inputs)
             if self._z_dist == 'gaussian':                
                 loc, scale = params[..., :self._z_dim], nn.functional.softplus(params[..., self._z_dim:])
-                if len(self._z_params) == 2:  # we are clamping scales
+                if len(self._z_params) >= 2:  # we are clamping scales
                     scale = torch.clamp(scales, self._z_params[0], self._z_params[1])
+                if len(self._z_params) == 4:  # we are clamping loc
+                    loc = torch.clamp(loc, self._z_params[2], self._z_params[3])
                 Z = td.Independent(td.Normal(loc=loc, scale=scale), 1)
             elif self._z_dist == 'gaussian-sparsemax':
                 loc, scale = params[..., :self._z_dim], nn.functional.softplus(params[..., self._z_dim:])
-                if len(self._z_params) == 2:  # we are clamping scales
+                if len(self._z_params) >= 2:  # we are clamping scales
                     scale = torch.clamp(scale, self._z_params[0], self._z_params[1])
-                Z = GaussianSparsemax(loc=loc, scale=scale)
+                if len(self._z_params) == 4:  # we are clamping loc
+                    loc = torch.clamp(loc, self._z_params[2], self._z_params[3])
+                Z = GaussianSparsemax(loc=loc, scale=scale, cdf_samples=self._gsp_cdf_samples, KL_samples=self._gsp_KL_samples)
             elif self._z_dist == 'dirichlet':
                 conc = nn.functional.softplus(params)
                 if len(self._z_params) == 2: # we are clamping concentrations
@@ -572,7 +582,7 @@ class VAE:
     def inf_parameters(self):
         return self.q.parameters()   
     
-    def critic(self, x_obs, z, q_F, state):
+    def critic(self, x_obs, z, q_F, state, exact_KL_Y=False):
         """This estimates reward (w.r.t sampling of F) on a single sample for variance reduction"""
         S, B, H, K, D = x_obs.shape[0], x_obs.shape[1], self.p.z_dim, self.p.y_dim, self.p.data_dim
         with torch.no_grad():            
@@ -611,9 +621,12 @@ class VAE:
             # [S, B]
             ll = p_X.log_prob(x_obs)
             # [S, B]
-            kl_Y = td.kl_divergence(q_Y, p_Y)
+            kl_Y_f = td.kl_divergence(q_Y, p_Y)
             # [S, B]
-            critic = ll - kl_Y
+            if exact_KL_Y:
+                critic = ll
+            else:
+                critic = ll - kl_Y_f
             
             if not self.q.mean_field:
                 p_Z = self.p.Z()
@@ -639,7 +652,7 @@ class VAE:
         self._rewards.append(reward.mean(dim).item())
         return avg, std
     
-    def DR(self, x_obs):
+    def DR(self, x_obs, exact_KL_Y=False):
         with torch.no_grad():
             B, H, K, D = x_obs.shape[0], self.p.z_dim, self.p.y_dim, self.p.data_dim            
 
@@ -684,22 +697,49 @@ class VAE:
             # the second term is exact 
             # the third tuse_self_criticis an MC estimate (we sampled f)
             D = -p_X.log_prob(x_obs)            
-            kl_Y = td.kl_divergence(q_Y, p_Y)
+            kl_Y_f = td.kl_divergence(q_Y, p_Y)
             kl_F = td.kl_divergence(q_F, p_F)
             kl_Z = td.kl_divergence(q_Z, p_Z)
 
-            ret['ELBO'] = -D - (kl_F + kl_Y + kl_Z)
-            ret['D'] = D
-            ret['R'] = kl_F + kl_Y + kl_Z
+            # [B]
+            if exact_KL_Y:
+                if type(q_Y) is not pd.MaskedDirichlet:
+                    raise ValueError("I can only compute exact KL Y if you use MaskedDirichlet posteriors")
+                kl_Y = self.KL_Y_Dir1(q_F, q_Y._concentration)
+            else:
+                kl_Y = torch.zeros_like(kl_F)
+            
+            if exact_KL_Y:
+                ret['ELBO'] = -D - (kl_F + kl_Y + kl_Z)
+                ret['D'] = D
+                ret['R'] = kl_F + kl_Y + kl_Z
+            else:
+                ret['ELBO'] = -D - (kl_F + kl_Y_f + kl_Z)
+                ret['D'] = D
+                ret['R'] = kl_F + kl_Y_f + kl_Z
             if self.p.y_dim:
                 ret['R_F'] = kl_F
-                ret['R_Y'] = kl_Y
+                ret['R_Y|f'] = kl_Y_f
+                if exact_KL_Y:
+                    ret['R_Y'] = kl_Y
             if self.p.z_dim:
                 ret['R_Z'] = kl_Z
         return ret
+
+    def KL_Y_Dir1(self, q_F, alphas):
+        # [S, B, K] 
+        all_f = q_F.enumerate_support()
+        assert alphas.shape == all_f.shape[1:], f"I need shape: {all_f.shape[1:]}"
+        all_q_f = q_F.log_prob(all_f).exp()
+        all_q_y = pd.MaskedDirichlet(all_f.bool(), alphas.expand(all_f.shape[:1] + alphas.shape)) 
+        all_p_y = pd.MaskedDirichlet(all_f.bool(), torch.ones_like(all_f)) 
+        # [S, B]
+        all_KL_Y = all_q_f * ( - all_q_y.entropy() - all_p_y.log_prob(all_p_y.sample()))  # TODO: this works because the prior Dirichlet is Dir(1.0)
+        # [B]
+        all_KL_Y = all_KL_Y.sum(0)
+        return all_KL_Y
     
-    
-    def loss(self, x_obs, c_obs=None, num_samples=1, samples=None, images=None, exact_marginal=False):
+    def loss(self, x_obs, c_obs=None, num_samples=1, samples=None, images=None, exact_marginal=False, exact_KL_Y=False):
         """
         :param x_obs: [B, D]
         """
@@ -766,36 +806,54 @@ class VAE:
         # the third tuse_self_criticis an MC estimate (we sampled f)
         # [S, B]
         ll = p_X.log_prob(x_obs)        
-        kl_Y = td.kl_divergence(q_Y, p_Y)
-        if exact_marginal:
-            # [S, B]
-            prob_f = q_F.log_prob(f).exp()
-            #print('prob_f', prob_f.shape, prob_f[:,0])
-            # [1, B]
-            ll = (prob_f * ll).sum(0, keepdims=True)
-            kl_Y = (prob_f * kl_Y).sum(0, keepdims=True)
+        kl_Y_f = td.kl_divergence(q_Y, p_Y)
+        
         # [1, B]
         kl_F = td.kl_divergence(q_F, p_F).unsqueeze(0)
         # [S, B]
         kl_Z = td.kl_divergence(q_Z, p_Z)
+
+        if exact_marginal:
+            # [S, B]
+            prob_f = q_F.log_prob(f).exp()
+            # [1, B]
+            ll = (prob_f * ll).sum(0, keepdims=True)
+            kl_Y = (prob_f * kl_Y).sum(0, keepdims=True)
+        elif exact_KL_Y:  # TODO: this can be optimised 
+            if type(q_Y) is not pd.MaskedDirichlet:
+                raise ValueError("I can only compute exact KL Y if you use MaskedDirichlet posteriors")
+            # [1, B]
+            kl_Y = self.KL_Y_Dir1(q_F, q_Y._concentration.squeeze(0)).unsqueeze(0)
+        else:
+            # [1, B]
+            kl_Y = torch.zeros_like(kl_F)
         
         # Logging ELBO terms
         # []
         reduce_dims = (0,1)
         ret['D'] = -ll.mean((0,1)).item()        
-        ret['R'] = (kl_F + kl_Y + kl_Z).mean((0,1)).item()        
-        ret['ELBO'] = (ll - kl_Y - kl_Z - kl_F).mean((0,1)).item()
+        if exact_marginal or exact_KL_Y:
+            ret['R'] = (kl_F + kl_Y + kl_Z).mean((0,1)).item()        
+            ret['ELBO'] = (ll - kl_Y - kl_Z - kl_F).mean((0,1)).item()
+        else:
+            ret['R'] = (kl_F + kl_Y_f + kl_Z).mean((0,1)).item()        
+            ret['ELBO'] = (ll - kl_Y_f - kl_Z - kl_F).mean((0,1)).item()
         if self.p.y_dim:
             ret['R_F'] = kl_F.mean((0,1)).item()
-            ret['R_Y'] = kl_Y.mean((0,1)).item()
+            ret['R_Y|f'] = kl_Y_f.mean((0,1)).item()
+            if exact_marginal or exact_KL_Y:
+                ret['R_Y'] = kl_Y.mean((0,1)).item()
         if self.p.z_dim:
             ret['R_Z'] = kl_Z.mean((0,1)).item()        
-            
+
         # Gradient surrogates and loss
         
         # i) reparameterised gradient (g_rep)
         # [S,B]
-        grep_surrogate = ll - kl_Z - kl_F - kl_Y  
+        if exact_marginal or exact_KL_Y:
+            grep_surrogate = ll - kl_Z - kl_F - kl_Y
+        else:
+            grep_surrogate = ll - kl_Z - kl_F - kl_Y_f
 
         # ii) score function estimator (g_SFE)
         if self.p.y_dim and not exact_marginal:
@@ -804,7 +862,10 @@ class VAE:
             # E_F[ r(F) ] for r(f) = log p(x|z,f,y)
             # r(f).detach() * log q(f)  
             # [S, B]
-            reward = (ll - kl_Y).detach() if self.q.mean_field else (ll - kl_Y - kl_Z).detach()
+            if exact_KL_Y:
+                reward = ll.detach() if self.q.mean_field else (ll - kl_Z).detach()
+            else:
+                reward = (ll - kl_Y_f).detach() if self.q.mean_field else (ll - kl_Y_f - kl_Z).detach()
             # Variance reduction tricks
             if self.use_self_critic:
                 if num_samples > 1:
@@ -816,7 +877,7 @@ class VAE:
                     criticised_reward = reward - critic.detach() 
                 else:
                     # [S, B]
-                    criticised_reward = reward - self.critic(x_obs, z=z, q_F=q_F, state=fy_state).detach()
+                    criticised_reward = reward - self.critic(x_obs, z=z, q_F=q_F, state=fy_state, exact_KL_Y=exact_KL_Y).detach()
             else:
                 criticised_reward = reward
             if self.use_reward_standardisation:

@@ -29,7 +29,8 @@ def arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--prior_y', default='dirichlet 1.0', type=str,
             help="This is a reparameterisable variable. Options: 'dirichlet (lower-concentration upper-concentration)'; 'identity'")
     parser.add_argument('--hidden_dec_size', default=500, type=int)
-    parser.add_argument('--posterior_z', default='gaussian', type=str)
+    parser.add_argument('--posterior_z', default='gaussian', type=str,
+            help="Options: 'gaussian (lower-scale upper-scale (lower-loc upper-loc))'; 'gaussian-sparsemax (lower-scale upper-scale (lower-loc upper-loc))'")
     parser.add_argument('--posterior_f', default='gibbs -10 10', type=str)
     parser.add_argument('--posterior_y', default='dirichlet 1e-3 1e3', type=str)
     #parser.add_argument('--shared_concentrations', default=True, type=str2bool)
@@ -51,9 +52,12 @@ def arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--load_ckpt', default=None, type=str)
     parser.add_argument('--reset_opt', default=False, type=str2bool)
     parser.add_argument('--exact_marginal', default=False, type=str2bool)
+    parser.add_argument('--exact_KL_Y', default=False, type=str2bool)
     parser.add_argument('--use_self_critic', default=False, type=str2bool)
     parser.add_argument('--use_reward_standardisation', default=False, type=str2bool)
     parser.add_argument('--tqdm', default=False, type=str2bool)
+    parser.add_argument('--gsp_cdf_samples', default=100, type=int)
+    parser.add_argument('--gsp_KL_samples', default=1, type=int)
 
     return parser
 

@@ -1,0 +1,2 @@
+--shared_enc_fy true --gen_lr 1e-4 --inf_lr 1e-4 --inf_p_drop 0.1 --inf_l2 1e-6 --exact_KL_Y true
+--shared_enc_fy true --gen_lr 1e-4 --inf_lr 1e-4 --inf_p_drop 0.1 --inf_l2 1e-6 --exact_KL_Y false
