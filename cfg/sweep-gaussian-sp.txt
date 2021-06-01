@@ -1,6 +1,6 @@
---gs_KL_samples 10 --gen_lr 5e-3 --inf_lr 5e-3 --inf_p_drop 0.1 --inf_l2 1e-6
---gs_KL_samples 10 --gen_lr 1e-3 --inf_lr 1e-3 --inf_p_drop 0.1 --inf_l2 1e-6
---gs_KL_samples 10 --gen_lr 5e-4 --inf_lr 5e-4 --inf_p_drop 0.1 --inf_l2 1e-6
---gs_KL_samples 10 --gen_lr 1e-4 --inf_lr 1e-4 --inf_p_drop 0.1 --inf_l2 1e-6
---gs_KL_samples 10 --gen_lr 1e-3 --inf_lr 5e-3 --inf_p_drop 0.1 --inf_l2 1e-6
---gs_KL_samples 10 --gen_lr 1e-4 --inf_lr 5e-4 --inf_p_drop 0.1 --inf_l2 1e-6
+--gsp_KL_samples 10 --gen_lr 5e-3 --inf_lr 5e-3 --inf_p_drop 0.1 --inf_l2 1e-6
+--gsp_KL_samples 10 --gen_lr 1e-3 --inf_lr 1e-3 --inf_p_drop 0.1 --inf_l2 1e-6
+--gsp_KL_samples 10 --gen_lr 5e-4 --inf_lr 5e-4 --inf_p_drop 0.1 --inf_l2 1e-6
+--gsp_KL_samples 10 --gen_lr 1e-4 --inf_lr 1e-4 --inf_p_drop 0.1 --inf_l2 1e-6
+--gsp_KL_samples 10 --gen_lr 1e-3 --inf_lr 5e-3 --inf_p_drop 0.1 --inf_l2 1e-6
+--gsp_KL_samples 10 --gen_lr 1e-4 --inf_lr 5e-4 --inf_p_drop 0.1 --inf_l2 1e-6
