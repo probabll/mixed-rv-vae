@@ -12,6 +12,54 @@ from itertools import chain
 def bitvec2str(f, as_set=False):
     return ''.join('1' if b else '0' for b in f) if not as_set else '{' + ','.join(f'{i:1d}' for i, b in enumerate(f, 1) if b) + '}'
 
+def collect_samples(vae, batcher, args, cols=5, exact_marginals=False, num_samples=None): 
+    if num_samples is None:
+        num_samples = args.num_samples
+
+    with torch.no_grad():
+        vae.eval()        
+    
+        prior = defaultdict(list)
+        posterior = defaultdict(list)
+        num_obs = 0
+
+        # Some visualisations
+        for x_obs, y_obs in batcher:
+            
+            # [B, H*W]
+            x_obs = x_obs.reshape(-1, args.height * args.width)
+            num_obs += x_obs.shape[0]
+
+            # [B, 10]
+            context = None
+            
+            B, H, K, D = x_obs.shape[0], vae.p.z_dim, vae.p.y_dim, vae.p.data_dim            
+                        
+            # [B, K]
+            f = vae.p.F().expand((B,)).sample()
+            y = vae.p.Y(f).sample()
+            # [B, H]
+            z = vae.p.Z().expand((B,)).sample()
+            #x = vae.p.X(z=z, y=y).sample()
+                        
+            # [B, K]
+            prior['f'].append(f.cpu().numpy())
+            # [B, K]
+            prior['y'].append(y.cpu().numpy())
+            # [B, K]
+            prior['z'].append(z.cpu().numpy())
+            
+            # [B, K], [B, K], [B, H]
+            f, y, z = vae.q.sample(x_obs)            
+            # [B, K]
+            posterior['f'].append(f.cpu().numpy())
+            # [B, K]
+            posterior['y'].append(y.cpu().numpy())
+            # [B, H]
+            posterior['z'].append(z.cpu().numpy())
+
+    return prior, posterior
+
 
 def compare_marginals(vae, batcher, args, cols=5, exact_marginals=False, num_samples=None): 
     if num_samples is None:
