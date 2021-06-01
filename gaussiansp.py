@@ -1,6 +1,5 @@
 import torch
 import torch.distributions as td
-from mvnorm import multivariate_normal_cdf
 
 import torch
 import torch.distributions as td
@@ -15,14 +14,14 @@ from entmax import sparsemax
 
 
 class GaussianSparsemax(td.Distribution):
-    
+
     arg_constraints = {
-        'loc': constraints.real, 
+        'loc': constraints.real,
         'scale': constraints.positive
-    }    
+    }
     support = td.constraints.simplex
     has_rsample = True
-    
+
     @classmethod
     def all_faces(K):
         """Generate a list of 2**K - 1 bit vectors indicating all possible faces of a K-dimensional simplex."""
@@ -46,17 +45,19 @@ class GaussianSparsemax(td.Distribution):
         # sample_shape + batch_shape + (K,)
         z = td.Normal(loc=self.loc, scale=self.scale).rsample(sample_shape)
         return sparsemax(z, dim=-1)
-    
+
     def log_prob(self, y, pivot_alg='first', tiny=1e-12, huge=1e12):
+        from mvnorm import multivariate_normal_cdf
+
         K = y.shape[-1]
         # [B, K]
         loc = self.loc
         scale = self.scale
         var = scale ** 2
-        
+
         # The face contains the set of coordinates greater than zero
         # [B, K]
-        face = y > 0 
+        face = y > 0
 
         # Chose a pivot coordinate (a non-zero coordinate)
         # [B]
@@ -66,7 +67,7 @@ class GaussianSparsemax(td.Distribution):
             ind_pivot = td.Categorical(
                 probs=face.float()/(face.float().sum(-1, keepdims=True))
             ).sample()
-        # Select a batch of pivots 
+        # Select a batch of pivots
         # [B, K]
         pivot_indicator = torch.nn.functional.one_hot(ind_pivot, K).bool()
         # All non-zero coordinates but the pivot
@@ -85,13 +86,13 @@ class GaussianSparsemax(td.Distribution):
         y_diff = torch.where(others, y - t.unsqueeze(-1), torch.zeros_like(y))
         # [B, K]
         mean_diff = torch.where(
-            others, 
+            others,
             loc - t_mean.unsqueeze(-1),
             torch.zeros_like(loc)
         )
-        
+
         # Joint log pdf for the non-zeros
-        # [B, K, K]    
+        # [B, K, K]
         diag = torch.diag_embed(torch.where(others, var, torch.ones_like(var)))
         offset = t_var.unsqueeze(-1).unsqueeze(-1)
         # We need a multivariate normal for the non-zero coordinates in `other`
@@ -107,23 +108,23 @@ class GaussianSparsemax(td.Distribution):
         log_prob = td.MultivariateNormal(mean_diff, cov).log_prob(y_diff)
         # so we discount the contribution from the masked coordinates
         # [B, K]
-        log_prob0 = td.Normal(torch.zeros_like(mean_diff), torch.ones_like(mean_diff)).log_prob(torch.zeros_like(y_diff)) 
+        log_prob0 = td.Normal(torch.zeros_like(mean_diff), torch.ones_like(mean_diff)).log_prob(torch.zeros_like(y_diff))
         log_prob = log_prob - torch.where(others, torch.zeros_like(log_prob0), log_prob0).sum(-1)
 
         # Joint log prob for the zeros (needs the cdf)
         # [B]
         constant_term = 1. / torch.where(face, 1./var, torch.zeros_like(var)).sum(-1)
-        # Again, we aim to reason with lower-dimensional mvns via 
+        # Again, we aim to reason with lower-dimensional mvns via
         # the td.MultivariateNormal interface. For that, I will mask the coordinates in face.
         # The non-zeros get a tiny variance
         # [B, K, K]
-        diag_corrected = torch.diag_embed(torch.where(face, torch.zeros_like(var) + tiny, var)) 
+        diag_corrected = torch.diag_embed(torch.where(face, torch.zeros_like(var) + tiny, var))
         # [B, 1, 1]
         offset_corrected = constant_term.unsqueeze(-1).unsqueeze(-1)
         # These are the zeros only.
         # [B, K, K]
-        cov_corrected_mask = torch.logical_not(face).unsqueeze(-1) * torch.logical_not(face.unsqueeze(-2))    
-        cov_corrected = torch.where(cov_corrected_mask, diag_corrected + offset_corrected, diag_corrected)    
+        cov_corrected_mask = torch.logical_not(face).unsqueeze(-1) * torch.logical_not(face.unsqueeze(-2))
+        cov_corrected = torch.where(cov_corrected_mask, diag_corrected + offset_corrected, diag_corrected)
 
         # The non-zeros get a large negative mean.
         # [B]
@@ -158,31 +159,31 @@ import probabll.distributions as pd
 
 
 class GaussianSparsemaxPrior(td.Distribution):
-    
+
     def __init__(self, pF, alpha_net, validate_args=False):
         self.pF = pF
         self.alpha_net = alpha_net
-        batch_shape, event_shape = pF.batch_shape, pF.event_shape        
+        batch_shape, event_shape = pF.batch_shape, pF.event_shape
         super().__init__(batch_shape, event_shape, validate_args=validate_args)
-    
+
     def expand(self, batch_shape, _instance=None):
         new = self._get_checked_instance(GaussianSparsemaxPrior, _instance)
         new.pF = self.pF.expand(batch_shape)
         new.alpha_net = self.alpha_net
         super(GaussianSparsemaxPrior, new).__init__(batch_shape, self.event_shape, validate_args=False)
         new._validate_args = self._validate_args
-        return new       
-        
+        return new
+
     def sample(self, sample_shape=torch.Size()):
         f = self.pF.sample(sample_shape)
-        Y = pd.MaskedDirichlet(f.bool(), self.alpha_net(f)) 
+        Y = pd.MaskedDirichlet(f.bool(), self.alpha_net(f))
         return Y.sample()
-        
-    def log_prob(self, value):        
-        f = (value > 0).float()       
-        Y = pd.MaskedDirichlet(f.bool(), self.alpha_net(f)) 
-        return self.pF.log_prob(f) + Y.log_prob(value)        
-    
+
+    def log_prob(self, value):
+        f = (value > 0).float()
+        Y = pd.MaskedDirichlet(f.bool(), self.alpha_net(f))
+        return self.pF.log_prob(f) + Y.log_prob(value)
+
 @td.register_kl(GaussianSparsemax, GaussianSparsemaxPrior)
 def _kl_gaussiansparsemax_gaussiansparsemaxprior(p, q):
     x = p.rsample()

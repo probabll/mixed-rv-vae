@@ -4,3 +4,6 @@ numpy
 tqdm
 matplotlib
 entmax
+wandb
+tabulate
+git+git://github.com/probabll/dists.pt@master#egg=probabll.distributions

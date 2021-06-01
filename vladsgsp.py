@@ -128,7 +128,7 @@ class GaussianSparsemax(td.Distribution):
 
         # pdf:
         # 2pi ^ {-k/2} det(cov)^{-1/2} exp(-1/2*(x-mu)Tcov^{-1} (x-mu))
-        
+
         # [B, K]
         cov_diag = torch.where(others, var, var.new_ones(1))
         # [B, K, rank=1]
@@ -142,7 +142,7 @@ class GaussianSparsemax(td.Distribution):
         # [B, K, K]
         #cov_mask = others.unsqueeze(-1) * others.unsqueeze(-2)
         #cov = torch.where(cov_mask, diag + offset, diag)
-        
+
         # This computes log prob of y[other] under  the lower dimensional mvn
         # times log N(0|0,1) for the other dimensions
         # [B]
@@ -163,7 +163,7 @@ class GaussianSparsemax(td.Distribution):
         # [B]
         inv_sum_inv_vars = (torch.where(face, inv_vars, zero)
                             .sum(dim=-1).reciprocal())
-        zscore = (y - loc) / var  
+        zscore = (y - loc) / var
         # [B]
         zsc_nz = torch.where(face, zscore, zero).sum(dim=-1)
 
@@ -172,8 +172,8 @@ class GaussianSparsemax(td.Distribution):
         t0 = torch.randn(tuple(1 for _ in loc.shape[:-1]) + (n_samples,), dtype=y.dtype, device=y.device)
 
         # [B]
-        adj_loc = (-inv_sum_inv_vars * zsc_nz) 
-        adj_scale = torch.sqrt(inv_sum_inv_vars) 
+        adj_loc = (-inv_sum_inv_vars * zsc_nz)
+        adj_scale = torch.sqrt(inv_sum_inv_vars)
 
         # [B, S]
         T = (adj_loc + adj_scale).unsqueeze(dim=-1) * t0
@@ -287,31 +287,31 @@ import probabll.distributions as pd
 
 
 class GaussianSparsemaxPrior(td.Distribution):
-    
+
     def __init__(self, pF, alpha_net, validate_args=False):
         self.pF = pF
         self.alpha_net = alpha_net
-        batch_shape, event_shape = pF.batch_shape, pF.event_shape        
+        batch_shape, event_shape = pF.batch_shape, pF.event_shape
         super().__init__(batch_shape, event_shape, validate_args=validate_args)
-    
+
     def expand(self, batch_shape, _instance=None):
         new = self._get_checked_instance(GaussianSparsemaxPrior, _instance)
         new.pF = self.pF.expand(batch_shape)
         new.alpha_net = self.alpha_net
         super(GaussianSparsemaxPrior, new).__init__(batch_shape, self.event_shape, validate_args=False)
         new._validate_args = self._validate_args
-        return new       
-        
+        return new
+
     def sample(self, sample_shape=torch.Size()):
         f = self.pF.sample(sample_shape)
-        Y = pd.MaskedDirichlet(f.bool(), self.alpha_net(f)) 
+        Y = pd.MaskedDirichlet(f.bool(), self.alpha_net(f))
         return Y.sample()
-        
-    def log_prob(self, value):        
-        f = (value > 0).float()       
-        Y = pd.MaskedDirichlet(f.bool(), self.alpha_net(f)) 
-        return self.pF.log_prob(f) + Y.log_prob(value)        
-    
+
+    def log_prob(self, value):
+        f = (value > 0).float()
+        Y = pd.MaskedDirichlet(f.bool(), self.alpha_net(f))
+        return self.pF.log_prob(f) + Y.log_prob(value)
+
 @td.register_kl(GaussianSparsemax, GaussianSparsemaxPrior)
 def _kl_gaussiansparsemax_gaussiansparsemaxprior(p, q):
     # [S, ...]
