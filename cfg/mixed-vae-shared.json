@@ -4,7 +4,7 @@
     "data_dir": "tmp",
     "height": 28,
     "width": 28,
-    "output_dir": "neurips-mixed-rv/shared-enc",
+    "output_dir": "neurips-mixed-rv/supp/mixed-maxent",
     "device": "cuda:0",
     "y_dim": 10,
     "prior_f": "gibbs-max-ent 0",
@@ -36,6 +36,6 @@
     "load_ckpt": null,
     "reset_opt": false,
     "exact_marginal": false,
-    "exact_KL_Y": false,
+    "exact_KL_Y": true,
     "tqdm": false
 }

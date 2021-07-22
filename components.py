@@ -738,7 +738,98 @@ class VAE:
         # [B]
         all_KL_Y = all_KL_Y.sum(0)
         return all_KL_Y
+    
+    def density_estimation_z(self, x_obs, z, reduce='mean'):
+        N, B, H, K, D = z.shape[0], x_obs.shape[0], self.p.z_dim, self.p.y_dim, self.p.data_dim  # S > 1
 
+        # [N, B, K]
+        z = z.unsqueeze(1).repeat((1, B, 1))
+        
+        # [N, B, K]
+        x_obs = x_obs.expand((N, B, D))
+        
+        # Approximate posteriors and samples
+        fy_state = dict()
+        q_F = self.q.F(x_obs, state=fy_state)
+        f = q_F.sample() # not rsample
+        q_Y = self.q.Y(x=x_obs, f=f, state=fy_state)
+        y = q_Y.rsample()  # with reparameterisation! (important)
+        
+        q_Z = self.q.Z(x=x_obs, y=y)
+        # [S, B, H]
+        z = q_Z.rsample()  # with reparameterisation
+
+        # [N, B]
+        log_prob_q = q_F.log_prob(f) 
+        log_prob_q += q_Y.log_prob(y)
+        log_prob_q += q_Z.log_prob(z)
+        
+        # Priors
+        p_F = self.p.F()
+        if p_F.batch_shape != (N, B,):
+            p_F = p_F.expand((N, B,))
+
+        p_Y = self.p.Y(f)  # we condition on f ~ q_F  thus batch_shape is already correct
+        
+        p_Z = self.p.Z()
+        if p_Z.batch_shape != (N, B):
+            p_Z = p_Z.expand((N,B))
+
+        # [N, B]
+        log_prob_p = p_F.log_prob(f) 
+        log_prob_p += p_Y.log_prob(y)
+        log_prob_p += p_Z.log_prob(z)
+        
+        if reduce == 'mean':
+            # [N], [N]
+            return log_prob_q.mean(1), log_prob_p.mean(1)
+        elif reduce == 'sum':
+            # [N], [N]
+            return log_prob_q.sum(1), log_prob_p.sum(1)
+        else:
+            # [N, B], [N, B]
+            return log_prob_q, log_prob_p
+    
+    def density_estimation_y(self, x_obs, y, reduce='mean'):
+        N, B, H, K, D = y.shape[0], x_obs.shape[0], self.p.z_dim, self.p.y_dim, self.p.data_dim  # S > 1
+
+        # [N, B, K]
+        y = y.unsqueeze(1).repeat((1, B, 1))
+        f = (y > 0).float()   
+        
+        # [N, B, K]
+        x_obs = x_obs.expand((N, B, D))
+        
+        # Approximate posteriors and samples
+        fy_state = dict()
+        q_F = self.q.F(x_obs, state=fy_state)
+
+        q_Y = self.q.Y(x=x_obs, f=f, state=fy_state)
+
+        # [N, B]
+        log_prob_q = q_F.log_prob(f) 
+        log_prob_q += q_Y.log_prob(y)
+        
+        # Priors
+        p_F = self.p.F()
+        if p_F.batch_shape != (B,):
+            p_F = p_F.expand((B,))
+
+        p_Y = self.p.Y(f)  # we condition on f ~ q_F  thus batch_shape is already correct
+        # [N, B]
+        log_prob_p = p_F.log_prob(f) 
+        log_prob_p += p_Y.log_prob(y)
+        
+        if reduce == 'mean':
+            # [N], [N]
+            return log_prob_q.mean(1), log_prob_p.mean(1)
+        elif reduce == 'sum':
+            # [N], [N]
+            return log_prob_q.sum(1), log_prob_p.sum(1)
+        else:
+            # [N, B], [N, B]
+            return log_prob_q, log_prob_p
+    
     def loss(self, x_obs, c_obs=None, num_samples=1, samples=None, images=None, exact_marginal=False, exact_KL_Y=False):
         """
         :param x_obs: [B, D]
@@ -818,7 +909,7 @@ class VAE:
             prob_f = q_F.log_prob(f).exp()
             # [1, B]
             ll = (prob_f * ll).sum(0, keepdims=True)
-            kl_Y = (prob_f * kl_Y).sum(0, keepdims=True)
+            kl_Y = (prob_f * kl_Y_f).sum(0, keepdims=True)
         elif exact_KL_Y:  # TODO: this can be optimised
             if type(q_Y) is not pd.MaskedDirichlet:
                 raise ValueError("I can only compute exact KL Y if you use MaskedDirichlet posteriors")

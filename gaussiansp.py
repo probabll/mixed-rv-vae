@@ -169,7 +169,8 @@ class GaussianSparsemax(td.Distribution):
 
         # monte carlo sample (possible optimisation: share noise across instances in batch, it should be safe from an MC point of view)
         # [B, S]
-        t0 = torch.randn(tuple(1 for _ in loc.shape[:-1]) + (n_samples,), dtype=y.dtype, device=y.device)
+        #t0 = torch.randn(tuple(1 for _ in loc.shape[:-1]) + (n_samples,), dtype=y.dtype, device=y.device)
+        t0 = torch.randn(loc.shape[:-1] + (n_samples,), dtype=y.dtype, device=y.device)
 
         # [B]
         adj_loc = (-inv_sum_inv_vars * zsc_nz)
@@ -199,6 +200,7 @@ class GaussianSparsemax(td.Distribution):
         # [B]
         # reduce the sample dimension
         log_cdf = torch.logsumexp(log_cdf_1d, dim=-1)
+        log_cdf = torch.clamp(log_cdf, torch.finfo(torch.float32).min, 0.)  
 
         ## VLAD code ends
 

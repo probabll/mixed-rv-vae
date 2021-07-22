@@ -12,7 +12,69 @@ from itertools import chain
 def bitvec2str(f, as_set=False):
     return ''.join('1' if b else '0' for b in f) if not as_set else '{' + ','.join(f'{i:1d}' for i, b in enumerate(f, 1) if b) + '}'
 
-def collect_samples(vae, batcher, args, cols=5, exact_marginals=False, num_samples=None): 
+
+def probe_corners(vae, batcher, args, num_samples=None): 
+    if num_samples is None:
+        num_samples = args.num_samples
+
+    with torch.no_grad():
+        vae.eval()        
+    
+        samples = [defaultdict(list) for _ in range(vae.p.y_dim)]
+
+        for i in range(vae.p.y_dim):
+            f = torch.zeros(vae.p.y_dim, device=torch.device(args.device))
+            f[i] = 1.0
+            # [S, K]
+            f = f.expand((num_samples, vae.p.y_dim))
+            y = vae.p.Y(f).sample()
+            # [B, H]
+            z = vae.p.Z().expand((num_samples,)).sample()
+            x = vae.p.X(z=z, y=y).sample()
+                        
+            # [B, K]
+            samples[i]['y'] = y.cpu().numpy()
+            samples[i]['z'] = z.cpu().numpy()
+            samples[i]['x'] = x.cpu().numpy()
+
+    return samples
+
+
+def probe_prior(vae, num_batches, batch_size, data_sample=False): 
+
+    with torch.no_grad():
+        vae.eval()        
+    
+        prior = defaultdict(list)
+
+        # Some visualisations
+        for _ in range(num_batches):
+            
+            
+            B, H, K, D = batch_size, vae.p.z_dim, vae.p.y_dim, vae.p.data_dim            
+                    
+
+            # [B, K]
+            f = vae.p.F().expand((B,)).sample()
+            y = vae.p.Y(f).sample()
+            # [B, H]
+            z = vae.p.Z().expand((B,)).sample()
+
+            # [B, K]
+            prior['f'].append(f.cpu().numpy())
+            # [B, K]
+            prior['y'].append(y.cpu().numpy())
+            # [B, K]
+            prior['z'].append(z.cpu().numpy())
+
+            if data_sample:
+                x = vae.p.X(z=z, y=y).sample()
+                prior['x'].append(x.cpu().numpy())
+
+    return prior
+
+
+def collect_samples(vae, batcher, args, exact_marginals=False, num_samples=None, from_prior=True, from_posterior=True, data_sample=False): 
     if num_samples is None:
         num_samples = args.num_samples
 
@@ -34,29 +96,37 @@ def collect_samples(vae, batcher, args, cols=5, exact_marginals=False, num_sampl
             context = None
             
             B, H, K, D = x_obs.shape[0], vae.p.z_dim, vae.p.y_dim, vae.p.data_dim            
-                        
-            # [B, K]
-            f = vae.p.F().expand((B,)).sample()
-            y = vae.p.Y(f).sample()
-            # [B, H]
-            z = vae.p.Z().expand((B,)).sample()
-            #x = vae.p.X(z=z, y=y).sample()
-                        
-            # [B, K]
-            prior['f'].append(f.cpu().numpy())
-            # [B, K]
-            prior['y'].append(y.cpu().numpy())
-            # [B, K]
-            prior['z'].append(z.cpu().numpy())
+                    
+            if from_prior:
+                # [B, K]
+                f = vae.p.F().expand((B,)).sample()
+                y = vae.p.Y(f).sample()
+                # [B, H]
+                z = vae.p.Z().expand((B,)).sample()
+
+                # [B, K]
+                prior['f'].append(f.cpu().numpy())
+                # [B, K]
+                prior['y'].append(y.cpu().numpy())
+                # [B, K]
+                prior['z'].append(z.cpu().numpy())
+                            #
+                if data_sample:
+                    x = vae.p.X(z=z, y=y).sample()
+                    prior['x'].append(x.cpu().numpy())
             
-            # [B, K], [B, K], [B, H]
-            f, y, z = vae.q.sample(x_obs)            
-            # [B, K]
-            posterior['f'].append(f.cpu().numpy())
-            # [B, K]
-            posterior['y'].append(y.cpu().numpy())
-            # [B, H]
-            posterior['z'].append(z.cpu().numpy())
+            if from_posterior:
+                # [B, K], [B, K], [B, H]
+                f, y, z = vae.q.sample(x_obs)            
+                # [B, K]
+                posterior['f'].append(f.cpu().numpy())
+                # [B, K]
+                posterior['y'].append(y.cpu().numpy())
+                # [B, H]
+                posterior['z'].append(z.cpu().numpy())
+                if data_sample:
+                    x = vae.p.X(z=z, y=y).sample()
+                    posterior['x'].append(x.cpu().numpy())
 
     return prior, posterior
 
@@ -240,7 +310,7 @@ def compare_marginals(vae, batcher, args, cols=5, exact_marginals=False, num_sam
             _ = plt.legend()
             plt.show()
 
-def compare_samples(vae, batcher, args, N=4, num_figs=1, num_samples=None): 
+def compare_samples(vae, batcher, args, N=4, num_figs=1, num_samples=None, prior_samples=False): 
 
     assert N <= args.batch_size, "N should be no bigger than a batch"
     if num_samples is None:
@@ -288,11 +358,12 @@ def compare_samples(vae, batcher, args, N=4, num_figs=1, num_samples=None):
                 if 0 < vae.p.y_dim <= 10:
                     plt.xlabel(f'f={bitvec2str(f[i])}')
                 
-                plt.subplot(4, N, 3*N + i + 1)
-                plt.imshow(x_[i].reshape(args.height, args.width).cpu(), cmap='Greys')
-                plt.title("X,Y,F")
-                if 0 < vae.p.y_dim <= 10:
-                    plt.xlabel(f'f={bitvec2str(f[i])}')
+                if prior_samples:
+                    plt.subplot(4, N, 3*N + i + 1)
+                    plt.imshow(x_[i].reshape(args.height, args.width).cpu(), cmap='Greys')
+                    plt.title("X,Y,F")
+                    if 0 < vae.p.y_dim <= 10:
+                        plt.xlabel(f'f={bitvec2str(f[i])}')
                 
             plt.show()
 

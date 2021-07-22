@@ -221,8 +221,8 @@ def main(args: namedtuple):
             ckpt_path=args.load_ckpt,
             load_opt=not args.reset_opt
         )
-        print('Generative model\n', state.p)
-        print('Inference model\n', state.q)
+        #print('Generative model\n', state.p)
+        #print('Inference model\n', state.q)
 
         # Training 
         
@@ -261,34 +261,35 @@ def main(args: namedtuple):
             for i, (x_obs, c_obs) in enumerate(iterator):
                 # [B, H*W]
                 x_obs = x_obs.reshape(-1, args.height * args.width)
-                
-                state.vae.train()      
-                #if i % 20 == 0:
-                #    samples, images = dict(), dict()
-                #else:
-                #    samples, images = None, None
-                samples, images = None, None
+                ret = None
+                for k in range(args.ppo_like_steps + 1):
+                    state.vae.train()      
+                    #if i % 20 == 0:
+                    #    samples, images = dict(), dict()
+                    #else:
+                    #    samples, images = None, None
+                    samples, images = None, None
 
-                loss, ret = state.vae.loss(x_obs, c_obs, 
-                    num_samples=args.training_samples, samples=samples, images=images, 
-                    exact_marginal=args.exact_marginal,
-                    exact_KL_Y=args.exact_KL_Y,
-                )
+                    loss, ret = state.vae.loss(x_obs, c_obs, 
+                        num_samples=args.training_samples, samples=samples, images=images, 
+                        exact_marginal=args.exact_marginal,
+                        exact_KL_Y=args.exact_KL_Y,
+                    )
+                    for k, v in ret.items():
+                        state.stats_tr[k].append(v)
 
-                for k, v in ret.items():
-                    state.stats_tr[k].append(v)
+                    state.p_opt.zero_grad()
+                    state.q_opt.zero_grad()        
+                    loss.backward()
 
-                state.p_opt.zero_grad()
-                state.q_opt.zero_grad()        
-                loss.backward()
-
-                torch.nn.utils.clip_grad_norm_(
-                    chain(state.vae.gen_parameters(), state.vae.inf_parameters()), 
-                    args.grad_clip
-                )        
-                state.p_opt.step()
-                state.q_opt.step()
+                    torch.nn.utils.clip_grad_norm_(
+                        chain(state.vae.gen_parameters(), state.vae.inf_parameters()), 
+                        args.grad_clip
+                    )        
+                    state.q_opt.step()
                
+                state.p_opt.step()
+
                 if p_scheduler:
                     p_scheduler.step()
                 if q_scheduler:
@@ -298,8 +299,10 @@ def main(args: namedtuple):
                     iterator.set_description(f'Epoch {epoch+1:3d}/{args.epochs}')
                     iterator.set_postfix(ret)
 
-                if i % 50 == 0:
+                if i % args.wandb_freq == 0:
                     wandb.log({f"training.{k}": v for k, v in ret.items()}, commit=False)
+                    wandb.log({f"gen.lr{i}": float(param_group['lr']) for i, param_group in enumerate(state.p_opt.param_groups)}, commit=False)
+                    wandb.log({f"inf.lr{i}": float(param_group['lr']) for i, param_group in enumerate(state.q_opt.param_groups)}, commit=False)
                     if samples:
                         wandb.log({f"training.{k}": v for k, v in samples.items()}, commit=False)
                     if images:

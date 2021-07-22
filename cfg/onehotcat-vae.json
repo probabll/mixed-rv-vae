@@ -1,10 +1,10 @@
 {
     "seed": 10,
-    "batch_size": 200,
-    "data_dir": "tmp",
+    "batch_size": 500,
     "height": 28,
     "width": 28, 
-    "output_dir": "neurips-mixed-rv/onehotcat-vae/0",
+    "output_dir": "neurips-mixed-rv/supp/onehotcat-vae",
+    "data_dir": "tmp",
     "device": "cuda:0",
     "y_dim": 0,    
     "z_dim": 10,
