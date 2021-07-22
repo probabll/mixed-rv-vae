@@ -135,17 +135,19 @@ def main():
     print("scipy")
     print(_scipy_log_prob(Y, mu, std))
 
-    print("our log_prob (1-D MC 1000 samples)")
+    Y = torch.stack([Y, Y])
+
+    print("our log_prob (1-D 1000 samples)")
     print(gs.log_prob(Y, n_samples=1000))
 
-    lp = torch.zeros(5)
-    print("our log_prob (1-D MC very many samples)")
+    # lp = torch.zeros(5)
+    # print("our log_prob (1-D MC very many samples)")
 
-    N = 1000
-    for _ in range(N):
-        lp += gs.log_prob(Y, n_samples=1000)
+    # N = 1000
+    # for _ in range(N):
+        # lp += gs.log_prob(Y, n_samples=1000)
 
-    print(lp / N)
+    # print(lp / N)
 
 
 

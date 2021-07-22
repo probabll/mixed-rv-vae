@@ -2,6 +2,7 @@ import sys
 from itertools import product
 
 import numpy as np
+from scipy.special import ndtri
 
 import torch
 import torch.distributions as td
@@ -61,6 +62,114 @@ class GaussianSparsemax(td.Distribution):
         # [S, B]
         log_prob = (p.log_prob(x) - 2.0*q.log_prob(x).sum(-1)).logsumexp(0) - np.log(sample_size)
         return log_prob
+
+    def _log_cdf_integrate(self, y, loc, scale, var, face, zero, n_samples):
+
+        if not hasattr(self, '_inv_cdf_us'):
+            us = np.linspace(0, 1, n_samples + 2)[1:-1]
+            self.log_du = np.log(us[1] - us[0])
+            inv_cdf_us = ndtri(us)
+            inv_cdf_us = torch.tensor(inv_cdf_us, device=y.device, dtype=y.dtype)
+            self._inv_cdf_us = inv_cdf_us
+        else:
+            inv_cdf_us = self._inv_cdf_us
+
+        inv_vars = var.reciprocal()
+
+        # [B]
+        inv_sum_inv_vars = torch.where(face, inv_vars, zero).sum(dim=-1).reciprocal()
+
+        # [B, K]
+        term_a_coef = torch.sqrt(inv_sum_inv_vars).unsqueeze(dim=-1) / scale
+        # [B, K, S]
+
+        # [1, 1, S]
+        inv_cdf_us = inv_cdf_us.reshape(tuple(1 for _ in term_a_coef.shape)
+                                        + inv_cdf_us.shape)
+        # [B, K, 1]
+        term_a_coef = term_a_coef.unsqueeze(dim=-1)
+
+        # [B, K, S]
+        term_a = term_a_coef * inv_cdf_us
+
+        # [B, Ki, Kj]
+        pairwise_diff = (y - loc).unsqueeze(-1) + loc.unsqueeze(-2)
+        pairwise_diff = pairwise_diff / var.unsqueeze(-1)
+
+        # [B, Kj]
+        num = torch.where(face.unsqueeze(-1), pairwise_diff, zero).sum(dim=-2)
+
+        # [B, Kj] also
+        idenom = inv_sum_inv_vars.unsqueeze(dim=-1) / scale
+
+        term_b = num * idenom
+
+        # [B, K, S]
+        t = term_a - term_b.unsqueeze(-1)
+        log_phi_t = log_ndtr(t)
+
+        # add up over zeros
+        log_integrand = torch.where(face.unsqueeze(-1),
+                                    zero,
+                                    log_phi_t).sum(dim=-2)
+
+        # do trapezoidal rule: average the two function evals in log space.
+        log_centers = torch.logaddexp(log_integrand[..., :-1],
+                                      log_integrand[..., 1:])
+        log_centers -= np.log(2)  # for trapezoidal
+        log_centers += self.log_du  #  interval width
+
+        log_cdf = torch.logsumexp(log_centers, dim=-1)
+
+        return log_cdf
+
+
+    def _log_cdf_mc(self, y, loc, scale, var, face, zero, n_samples):
+        # Joint log prob for the zeros
+
+        # [B, K]
+        inv_vars = var.reciprocal()
+        # [B]
+        inv_sum_inv_vars = (torch.where(face, inv_vars, zero)
+                            .sum(dim=-1).reciprocal())
+        zscore = (y - loc) / var
+        # [B]
+        zsc_nz = torch.where(face, zscore, zero).sum(dim=-1)
+
+        # monte carlo sample (possible optimisation: share noise across instances in batch, it should be safe from an MC point of view)
+        # [B, S]
+        t0 = torch.randn(tuple(1 for _ in loc.shape[:-1]) + (n_samples,), dtype=y.dtype, device=y.device)
+
+        # [B]
+        adj_loc = (-inv_sum_inv_vars * zsc_nz)
+        adj_scale = torch.sqrt(inv_sum_inv_vars)
+
+        # [B, S]
+        T = adj_loc.unsqueeze(dim=-1) + adj_scale.unsqueeze(dim=-1) * t0
+        # [B, 1, S]
+        T = T.unsqueeze(dim=-2)
+
+        # [B, K, 1]
+        loc_ = loc.unsqueeze(dim=-1)
+        scale_ = scale.unsqueeze(dim=-1)
+
+        # compute univariate standard normal CDF, elementwise.
+        # This crucially requires careful numerical code.
+        # [B, K, S]
+        T_zsc = (T - loc_) / scale_
+        log_cdf_1d = log_ndtr(T_zsc)
+
+        # [B, S]
+        # we mask and reduce_sum over k in [K] (the zeros)
+        log_cdf_1d = (torch.where(face.unsqueeze(dim=-1), zero, log_cdf_1d)
+                      .sum(dim=-2))
+        log_cdf_1d -= np.log(n_samples)
+
+        # [B]
+        # reduce the sample dimension
+        log_cdf = torch.logsumexp(log_cdf_1d, dim=-1)
+        return log_cdf
+
 
     def log_prob(self, y, pivot_alg='first', tiny=1e-9, huge=1e9,
             n_samples=None):
@@ -156,53 +265,9 @@ class GaussianSparsemax(td.Distribution):
         # [B]
         log_prob = log_prob - torch.where(others, zero, log_prob0).sum(-1)
 
-        # Joint log prob for the zeros
-        ## VLAD's code starts here
-        # [B, K]
-        inv_vars = var.reciprocal()
-        # [B]
-        inv_sum_inv_vars = (torch.where(face, inv_vars, zero)
-                            .sum(dim=-1).reciprocal())
-        zscore = (y - loc) / var
-        # [B]
-        zsc_nz = torch.where(face, zscore, zero).sum(dim=-1)
+        # log_cdf = self._log_cdf_mc(y, loc, scale, var, face, zero, n_samples)
+        log_cdf = self._log_cdf_integrate(y, loc, scale, var, face, zero, n_samples)
 
-        # monte carlo sample (possible optimisation: share noise across instances in batch, it should be safe from an MC point of view)
-        # [B, S]
-        #t0 = torch.randn(tuple(1 for _ in loc.shape[:-1]) + (n_samples,), dtype=y.dtype, device=y.device)
-        t0 = torch.randn(loc.shape[:-1] + (n_samples,), dtype=y.dtype, device=y.device)
-
-        # [B]
-        adj_loc = (-inv_sum_inv_vars * zsc_nz)
-        adj_scale = torch.sqrt(inv_sum_inv_vars)
-
-        # [B, S]
-        T = adj_loc.unsqueeze(dim=-1) + adj_scale.unsqueeze(dim=-1) * t0
-        # [B, 1, S]
-        T = T.unsqueeze(dim=-2)
-
-        # [B, K, 1]
-        loc_ = loc.unsqueeze(dim=-1)
-        scale_ = scale.unsqueeze(dim=-1)
-
-        # compute univariate standard normal CDF, elementwise.
-        # This crucially requires careful numerical code.
-        # [B, K, S]
-        T_zsc = (T - loc_) / scale_
-        log_cdf_1d = log_ndtr(T_zsc)
-
-        # [B, S]
-        # we mask and reduce_sum over k in [K] (the zeros)
-        log_cdf_1d = (torch.where(face.unsqueeze(dim=-1), zero, log_cdf_1d)
-                      .sum(dim=-2))
-        log_cdf_1d -= np.log(n_samples)
-
-        # [B]
-        # reduce the sample dimension
-        log_cdf = torch.logsumexp(log_cdf_1d, dim=-1)
-        log_cdf = torch.clamp(log_cdf, torch.finfo(torch.float32).min, 0.)  
-
-        ## VLAD code ends
 
         # [B]
         log_det = face.float().sum(-1).log()
