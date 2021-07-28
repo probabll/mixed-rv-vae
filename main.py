@@ -89,7 +89,7 @@ def make_state(args: namedtuple, device: str, ckpt_path: str = None, load_opt=Tr
     # Checkpoints
     
     if ckpt_path:
-        ckpt = torch.load(ckpt_path)
+        ckpt = torch.load(ckpt_path, map_location=device)
         p.load_state_dict(ckpt['p_state_dict'])            
         p = p.to(torch.device(device))
         q.load_state_dict(ckpt['q_state_dict'])            
