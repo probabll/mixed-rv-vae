@@ -16,6 +16,10 @@ pip install -r requirements.txt
 
 # Download Trained Models
 
+```bash
+wget https://surfdrive.surf.nl/files/index.php/s/r5gx64Nlpoe9GcM/download -O trained_models.tar
+tar -xvf trained_models.tar
+```
+
 # Analysis
 
-Uncompress the knnclassifier: `tar -xzvf knnclassifier.tgz`.
