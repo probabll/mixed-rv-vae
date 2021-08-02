@@ -3,9 +3,18 @@ VAEs with mixed random variables.
 # Dependencies
 
 ```bash
-mkdir deps
-cd deps
-git clone https://github.com/probabll/dists.pt.git
-cd dists.pt
-pip install -e .
+virtualenv -p python3 ~/envs/mixedrv
+source ~/envs/mixed/bin/activate
+
+git clone https://github.com/probabll/mixed-rv-vae.git
+cd mixed-rv-vae
+
+pip install -r requirements.txt
 ```
+
+# Training
+
+# Download Trained Models
+
+# Analysis
+
