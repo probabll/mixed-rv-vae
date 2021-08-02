@@ -6,4 +6,5 @@ matplotlib
 entmax
 wandb
 tabulate
+scipy
 git+git://github.com/probabll/dists.pt@master#egg=probabll.distributions

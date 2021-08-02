@@ -310,7 +310,7 @@ def compare_marginals(vae, batcher, args, cols=5, exact_marginals=False, num_sam
             _ = plt.legend()
             plt.show()
 
-def compare_samples(vae, batcher, args, N=4, num_figs=1, num_samples=None, prior_samples=False): 
+def compare_samples(vae, batcher, args, N=4, num_figs=1, num_samples=None, prior_samples=False, filename=None): 
 
     assert N <= args.batch_size, "N should be no bigger than a batch"
     if num_samples is None:
@@ -322,9 +322,8 @@ def compare_samples(vae, batcher, args, N=4, num_figs=1, num_samples=None, prior
             
         # Some visualisations
         for r, (x_obs, y_obs) in enumerate(batcher, 1):
-
-            plt.figure(figsize=(2*N, 2*N))
-            plt.subplots_adjust(wspace=0.5, hspace=0.5)        
+            #plt.figure(figsize=(2*N, 2*N))
+            #plt.subplots_adjust(wspace=0.5, hspace=0.5)        
         
             
             # [B, H*W]
@@ -342,33 +341,38 @@ def compare_samples(vae, batcher, args, N=4, num_figs=1, num_samples=None, prior
             # prior samples
             f_, y_, z_, x_ = vae.p.sample((N,))
 
+            fig, axs = plt.subplots(3 + int(prior_samples), N, figsize=(2*N, 2*N))
+            
             for i in range(N):
-                plt.subplot(4, N, 0*N + i + 1)
-                plt.imshow(x_obs[i].reshape(args.height, args.width).cpu(), cmap='Greys')
-                plt.title("$x^{(%d)}$" % (i+1))
+                #plt.subplot(4, N, fig0*N + i + 1)
+                axs[0, i].imshow(x_obs[i].reshape(args.height, args.width).cpu(), cmap='Greys')
+                axs[0, i].set_title("$x^{(%d)}$" % (i+1))
 
-                plt.subplot(4, N, 1*N + i + 1)
-                plt.imshow(x[i].reshape(args.height, args.width).cpu(), cmap='Greys')
-                plt.title("$p(x^{(%d)})$" % (i+1))
+                #plt.subplot(4, N, 1*N + i + 1)
+                axs[1, i].imshow(x[i].reshape(args.height, args.width).cpu(), cmap='Greys')
+                axs[1, i].set_title("$p(x^{(%d)})$" % (i+1))
                 
-                plt.subplot(4, N, 2*N + i + 1)                
+                #plt.subplot(4, N, 2*N + i + 1)                
                 #plt.axhline(y=args.height//2, c='red', linewidth=1, ls='--')
-                plt.imshow(x[i].reshape(args.height, args.width).cpu(), cmap='Greys')
-                plt.title("X,Y,F|$x^{(%d)}$" % (i+1))
-                if 0 < vae.p.y_dim <= 10:
-                    plt.xlabel(f'f={bitvec2str(f[i])}')
+                axs[2, i].imshow(x[i].reshape(args.height, args.width).cpu(), cmap='Greys')
+                axs[2, i].set_title("X,Y,F|$x^{(%d)}$" % (i+1))
+                #if 0 < vae.p.y_dim <= 10:
+                #    plt.xlabel(f'f={bitvec2str(f[i])}')
                 
                 if prior_samples:
-                    plt.subplot(4, N, 3*N + i + 1)
-                    plt.imshow(x_[i].reshape(args.height, args.width).cpu(), cmap='Greys')
-                    plt.title("X,Y,F")
-                    if 0 < vae.p.y_dim <= 10:
-                        plt.xlabel(f'f={bitvec2str(f[i])}')
+                    #plt.subplot(4, N, 3*N + i + 1)
+                    axs[3, i].imshow(x_[i].reshape(args.height, args.width).cpu(), cmap='Greys')
+                    axs[3, i].set_title("X,Y,F")
+                    #if 0 < vae.p.y_dim <= 10:
+                    #    plt.xlabel(f'f={bitvec2str(f[i])}')
+            
+            #plt.show()
+            if filename is not None:
+                fig.savefig(f'{filename}-{r}.pdf')
                 
-            plt.show()
-
             if r == num_figs:
-                break
+                break 
+                
                 
 def samples_per_digit(vae, batcher, args, return_marginal=False): 
 

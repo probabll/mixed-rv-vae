@@ -23,7 +23,7 @@ def arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--device', default='cuda:0', type=str)
     parser.add_argument('--z_dim', default=32, type=int)
     parser.add_argument('--prior_z', default='gaussian 0.0 1.0', type=str,
-            help="This is a reparameterisable variable. Options: 'gaussian loc scale';  'dirichlet concentration'; 'onehotcat temperature logit'; 'gaussian-sparsemax-max-ent bit-precision'")
+            help="This is a reparameterisable variable. Options: 'gaussian loc scale';  'dirichlet concentration'; 'onehotcat temperature logit'; 'gaussian-sparsemax-max-ent bit-precision'. Note that 'onehotcat' is Gumbel-Softmax-Straight-Through.")
     parser.add_argument('--y_dim', default=0, type=int)
     parser.add_argument('--prior_f', default='gibbs 0.0', type=str,
             help="This is a truly discrete variable. Options: 'gibbs logit'; 'gibbs-max-ent bit-precision'; 'categorical logit'")
