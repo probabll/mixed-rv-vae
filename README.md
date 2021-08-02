@@ -18,3 +18,4 @@ pip install -r requirements.txt
 
 # Analysis
 
+Uncompress the knnclassifier: `tar -xzvf knnclassifier.tgz`.
